@@ -82,6 +82,13 @@ sudo PYTHONPATH=/opt/messenger-worksheets/app \
 
 Ожидаемый префикс результата — `worker_smoke_test_ok`.
 
+Если Python сообщает `CA cert does not include key usage extension`, обновите
+checkout и один раз восстановите локальную TLS-цепочку без изменения секретов:
+
+```bash
+sudo bash deployment/repair_tls.sh
+```
+
 Шлюз запускается только после read-only проверки OAuth и отдельного разрешения
 на отправку пробного сообщения:
 

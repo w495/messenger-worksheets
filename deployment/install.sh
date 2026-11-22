@@ -66,35 +66,16 @@ fi
     --disable-pip-version-check --requirement /opt/messenger-worksheets/app/requirements.txt
 chown -R root:root /opt/messenger-worksheets/venv
 
-install -d -m 0755 -o root -g root /etc/messenger-worksheets
-install -d -m 0750 -o root -g worksheet-worker /etc/messenger-worksheets/worker
-
 if [[ ! -s /etc/messenger-worksheets/ca.crt || ! -s /etc/messenger-worksheets/worker/server.crt \
-      || ! -s /etc/messenger-worksheets/worker/server.key ]]; then
-    certificate_work=$(mktemp -d)
-    trap 'rm -rf -- "${certificate_work}"' EXIT
-    openssl genpkey -algorithm ED25519 -out "${certificate_work}/ca.key"
-    openssl req -x509 -new -key "${certificate_work}/ca.key" -days 825 \
-        -subj '/CN=messenger-worksheets-local-ca' -out "${certificate_work}/ca.crt"
-    openssl genpkey -algorithm ED25519 -out "${certificate_work}/server.key"
-    openssl req -new -key "${certificate_work}/server.key" \
-        -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1,DNS:localhost' \
-        -out "${certificate_work}/server.csr"
-    printf '%s\n' 'subjectAltName=IP:127.0.0.1,DNS:localhost' > "${certificate_work}/server.ext"
-    openssl x509 -req -in "${certificate_work}/server.csr" \
-        -CA "${certificate_work}/ca.crt" -CAkey "${certificate_work}/ca.key" \
-        -CAcreateserial -days 825 -extfile "${certificate_work}/server.ext" \
-        -out "${certificate_work}/server.crt"
-    install -m 0644 -o root -g root "${certificate_work}/ca.crt" /etc/messenger-worksheets/ca.crt
-    install -m 0644 -o root -g worksheet-worker "${certificate_work}/server.crt" \
-        /etc/messenger-worksheets/worker/server.crt
-    install -m 0640 -o root -g worksheet-worker "${certificate_work}/server.key" \
-        /etc/messenger-worksheets/worker/server.key
+      || ! -s /etc/messenger-worksheets/worker/server.key ]] \
+      || ! openssl x509 -in /etc/messenger-worksheets/ca.crt -noout -text | \
+          grep -q 'Certificate Sign'; then
+    "${deployment_source}/generate_tls.sh"
 fi
 
 worker_tmp=$(mktemp)
 gateway_tmp=$(mktemp)
-trap 'rm -f -- "${worker_tmp}" "${gateway_tmp}"; [[ -z ${certificate_work:-} ]] || rm -rf -- "${certificate_work}"' EXIT
+trap 'rm -f -- "${worker_tmp}" "${gateway_tmp}"' EXIT
 messenger_oauth=
 openai_key=
 read_secret "Personal Yandex Messenger OAuth" messenger_oauth
