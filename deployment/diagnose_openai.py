@@ -6,8 +6,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import pwd
+import re
 import signal
 import subprocess
+from tempfile import TemporaryFile
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -61,6 +63,24 @@ def resolve_native_codex(configured: str) -> str:
     return str(executable[0])
 
 
+def classify_diagnostic(stderr: str, stdout: str, returncode: int) -> str:
+    diagnostic = (stderr + "\n" + stdout).casefold()
+    categories = (
+        ("login_required", r"not logged in|codex login|login required"),
+        ("authentication", r"\b401\b|unauthorized|invalid[_ ]api[_ ]key|authentication"),
+        ("forbidden", r"\b403\b|forbidden"),
+        ("quota_or_rate_limit", r"\b429\b|insufficient_quota|rate limit|usage limit|billing"),
+        ("model_unavailable", r"model.*(?:not found|does not exist|not available|not supported|access)"),
+        ("connection", r"failed to connect|connection refused|stream disconnected|request timed out"),
+        ("configuration", r"error loading config|unknown field|invalid value|no model selected"),
+        ("permission", r"permission denied|operation not permitted"),
+    )
+    for name, pattern in categories:
+        if re.search(pattern, diagnostic):
+            return name
+    return f"unknown_exit_{returncode}"
+
+
 def codex_probe(binary: str, key: str) -> str:
     account = pwd.getpwnam("worksheet-worker")
     command = [
@@ -88,27 +108,34 @@ def codex_probe(binary: str, key: str) -> str:
         "OPENAI_API_KEY": key,
     }
 
-    process = subprocess.Popen(
-        command,
-        cwd=STATE_DIR,
-        env=environment,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        process.communicate("Reply exactly CODEX_OK", timeout=45)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+    with TemporaryFile(mode="w+t", encoding="utf-8") as stdout_file, \
+            TemporaryFile(mode="w+t", encoding="utf-8") as stderr_file:
+        process = subprocess.Popen(
+            command,
+            cwd=STATE_DIR,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            process.wait(timeout=5)
+            process.communicate("Reply exactly CODEX_OK", timeout=45)
         except subprocess.TimeoutExpired:
-            process.kill()
-        return "codex_cli=timeout"
+            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            return "codex_cli=timeout"
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = stdout_file.read(1024 * 1024)
+        stderr = stderr_file.read(1024 * 1024)
     if process.returncode:
-        return f"codex_cli=exit_{process.returncode}"
+        reason = classify_diagnostic(stderr, stdout, process.returncode)
+        return f"codex_cli=exit_{process.returncode} reason={reason}"
     return "codex_cli=ok"
 
 
