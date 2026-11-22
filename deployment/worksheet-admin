@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH=/usr/local/bin:/usr/bin:/bin
+unset PYTHONPATH
+
+if [[ ${EUID} -ne 0 || $# -ne 1 ]]; then
+    echo "Usage: sudo worksheet-admin <operation>" >&2
+    exit 64
+fi
+
+python=/opt/messenger-worksheets/venv/bin/python
+admin=/opt/messenger-worksheets/admin
+
+case $1 in
+    status)
+        systemctl show worksheet-worker.service worksheet-gateway.service \
+            -p Id -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager
+        ;;
+    diagnose-openai)
+        exec "${python}" "${admin}/diagnose_openai.py"
+        ;;
+    login-codex)
+        exec "${python}" "${admin}/login_codex.py"
+        ;;
+    smoke-worker)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/smoke_test_worker.py"
+        ;;
+    set-native-codex)
+        shopt -s nullglob
+        candidates=(/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-*/vendor/*/bin/codex)
+        if [[ ${#candidates[@]} -ne 1 || ! -x ${candidates[0]} ]]; then
+            echo "Expected exactly one native Codex binary." >&2
+            exit 1
+        fi
+        environment=/etc/messenger-worksheets/worker.env
+        temporary=$(mktemp /etc/messenger-worksheets/worker.env.XXXXXX)
+        trap 'rm -f -- "${temporary}"' EXIT
+        awk -v binary="${candidates[0]}" '
+            BEGIN { replaced = 0 }
+            /^WORKSHEET_CODEX_BINARY=/ { print "WORKSHEET_CODEX_BINARY=" binary; replaced = 1; next }
+            { print }
+            END { if (!replaced) exit 2 }
+        ' "${environment}" > "${temporary}"
+        chmod 0600 "${temporary}"
+        chown root:root "${temporary}"
+        mv -f -- "${temporary}" "${environment}"
+        trap - EXIT
+        echo "Worker configured to use the native Codex binary."
+        ;;
+    start-worker)
+        systemctl start worksheet-worker.service
+        ;;
+    restart-worker)
+        systemctl restart worksheet-worker.service
+        ;;
+    stop-worker)
+        systemctl stop worksheet-worker.service
+        ;;
+    start-gateway)
+        systemctl start worksheet-gateway.service
+        ;;
+    stop-gateway)
+        systemctl stop worksheet-gateway.service
+        ;;
+    logs-worker)
+        journalctl -u worksheet-worker.service -n 100 --no-pager
+        ;;
+    logs-gateway)
+        journalctl -u worksheet-gateway.service -n 100 --no-pager
+        ;;
+    revoke)
+        rm -f -- /etc/sudoers.d/messenger-worksheets-admin
+        rm -rf -- /opt/messenger-worksheets/admin
+        rm -f -- /usr/local/sbin/worksheet-admin
+        echo "Restricted worksheet-admin access revoked."
+        ;;
+    *)
+        echo "Unsupported worksheet-admin operation." >&2
+        exit 64
+        ;;
+esac

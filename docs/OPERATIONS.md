@@ -55,6 +55,19 @@ Installation prepared. Services were not enabled or started.
 
 ## 4. Проверка после установки
 
+На время настройки можно установить root-owned helper с закрытым списком
+операций. Он не принимает произвольные команды или пути:
+
+```bash
+sudo bash deployment/install_admin_helper.sh
+```
+
+После завершения настройки доступ обязательно отзывается:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin revoke
+```
+
 Не запускайте шлюз до проверки личности аккаунта. Сначала проверьте, что units
 загрузились и обработчик стартует:
 

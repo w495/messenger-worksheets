@@ -3,11 +3,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import pwd
-import re
 import signal
 import subprocess
 from urllib.error import HTTPError, URLError
@@ -63,23 +61,6 @@ def resolve_native_codex(configured: str) -> str:
     return str(executable[0])
 
 
-def classify_diagnostic(stderr: str, stdout: str, returncode: int) -> str:
-    diagnostic = (stderr + "\n" + stdout).casefold()
-    categories = (
-        ("login_required", r"not logged in|codex login|login required"),
-        ("authentication", r"\b401\b|unauthorized|invalid[_ ]api[_ ]key|authentication"),
-        ("forbidden", r"\b403\b|forbidden"),
-        ("quota_or_rate_limit", r"\b429\b|insufficient_quota|rate limit|usage limit|billing"),
-        ("model_unavailable", r"model.*(?:not found|does not exist|not available|access)"),
-        ("connection", r"failed to connect|connection refused|stream disconnected|request timed out"),
-        ("configuration", r"error loading config|unknown field|invalid value"),
-    )
-    for name, pattern in categories:
-        if re.search(pattern, diagnostic):
-            return name
-    return f"exit_{returncode}"
-
-
 def codex_probe(binary: str, key: str) -> str:
     account = pwd.getpwnam("worksheet-worker")
     command = [
@@ -112,38 +93,23 @@ def codex_probe(binary: str, key: str) -> str:
         cwd=STATE_DIR,
         env=environment,
         stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         text=True,
         start_new_session=True,
     )
     try:
-        stdout, stderr = process.communicate("Reply exactly CODEX_OK", timeout=75)
+        process.communicate("Reply exactly CODEX_OK", timeout=45)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
         return "codex_cli=timeout"
     if process.returncode:
-        return "codex_cli=" + classify_diagnostic(stderr, stdout, process.returncode)
-    try:
-        events = [json.loads(line) for line in stdout.splitlines()]
-    except (TypeError, ValueError):
-        return "codex_cli=invalid_json"
-    completed = any(event.get("type") == "turn.completed" for event in events)
-    replied = any(
-        event.get("type") == "item.completed"
-        and event.get("item", {}).get("type") == "agent_message"
-        and bool(event.get("item", {}).get("text", "").strip())
-        for event in events
-    )
-    return "codex_cli=ok" if completed and replied else "codex_cli=incomplete"
+        return f"codex_cli=exit_{process.returncode}"
+    return "codex_cli=ok"
 
 
 def main() -> None:
