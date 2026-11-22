@@ -54,6 +54,7 @@ def api_probe(key: str) -> str:
 def classify_diagnostic(stderr: str, stdout: str, returncode: int) -> str:
     diagnostic = (stderr + "\n" + stdout).casefold()
     categories = (
+        ("login_required", r"not logged in|codex login|login required"),
         ("authentication", r"\b401\b|unauthorized|invalid[_ ]api[_ ]key|authentication"),
         ("forbidden", r"\b403\b|forbidden"),
         ("quota_or_rate_limit", r"\b429\b|insufficient_quota|rate limit|usage limit|billing"),

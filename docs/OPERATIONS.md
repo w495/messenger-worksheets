@@ -89,6 +89,15 @@ sudo PYTHONPATH=/opt/messenger-worksheets/app \
 sudo /opt/messenger-worksheets/venv/bin/python deployment/diagnose_openai.py
 ```
 
+Если API отвечает `200`, а Codex сообщает `login_required` или
+`authentication`, выполните официальный вход с API key под изолированным
+пользователем. Helper читает ключ из root-only файла и передаёт его Codex через
+stdin, не аргументом команды:
+
+```bash
+sudo /opt/messenger-worksheets/venv/bin/python deployment/login_codex.py
+```
+
 Если Python сообщает `CA cert does not include key usage extension`, обновите
 checkout и один раз восстановите локальную TLS-цепочку без изменения секретов:
 
