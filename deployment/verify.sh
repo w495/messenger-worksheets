@@ -8,6 +8,7 @@ bash -n deployment/install.sh deployment/verify.sh deployment/generate_tls.sh de
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck deployment/install.sh deployment/verify.sh deployment/generate_tls.sh deployment/repair_tls.sh
 fi
-python3 -m compileall -q messenger-worksheets messenger-client deployment/smoke_test_worker.py
+python3 -m compileall -q messenger-worksheets messenger-client \
+    deployment/smoke_test_worker.py deployment/diagnose_openai.py
 
 echo "Repository checks passed."

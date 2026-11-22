@@ -82,6 +82,13 @@ sudo PYTHONPATH=/opt/messenger-worksheets/app \
 
 Ожидаемый префикс результата — `worker_smoke_test_ok`.
 
+При `HTTP 503` от smoke-test выполните безопасную диагностику API и Codex CLI.
+Она не печатает ключ, HTTP-body или сырой stderr:
+
+```bash
+sudo /opt/messenger-worksheets/venv/bin/python deployment/diagnose_openai.py
+```
+
 Если Python сообщает `CA cert does not include key usage extension`, обновите
 checkout и один раз восстановите локальную TLS-цепочку без изменения секретов:
 
