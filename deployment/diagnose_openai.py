@@ -51,6 +51,18 @@ def api_probe(key: str) -> str:
         return f"openai_api_network_error={type(error.reason).__name__}"
 
 
+def resolve_native_codex(configured: str) -> str:
+    path = Path(configured).resolve(strict=True)
+    if path.suffix != ".js":
+        return str(path)
+    package = path.parent.parent
+    candidates = sorted(package.glob("node_modules/@openai/codex-*/vendor/*/bin/codex"))
+    executable = [candidate for candidate in candidates if candidate.is_file() and os.access(candidate, os.X_OK)]
+    if len(executable) != 1:
+        raise RuntimeError("could not resolve exactly one native Codex binary")
+    return str(executable[0])
+
+
 def classify_diagnostic(stderr: str, stdout: str, returncode: int) -> str:
     diagnostic = (stderr + "\n" + stdout).casefold()
     categories = (
@@ -109,7 +121,14 @@ def codex_probe(binary: str, key: str) -> str:
         stdout, stderr = process.communicate("Reply exactly CODEX_OK", timeout=75)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
         return "codex_cli=timeout"
     if process.returncode:
         return "codex_cli=" + classify_diagnostic(stderr, stdout, process.returncode)
@@ -132,7 +151,9 @@ def main() -> None:
         raise SystemExit("Run this diagnostic with sudo.")
     values = load_worker_environment()
     print(api_probe(values["WORKSHEET_CODEX_API_KEY"]))
-    print(codex_probe(values["WORKSHEET_CODEX_BINARY"], values["WORKSHEET_CODEX_API_KEY"]))
+    binary = resolve_native_codex(values["WORKSHEET_CODEX_BINARY"])
+    print("codex_binary=native")
+    print(codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"]))
 
 
 if __name__ == "__main__":
