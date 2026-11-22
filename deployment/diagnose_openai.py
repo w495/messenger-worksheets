@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import signal
 import subprocess
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
@@ -69,6 +70,11 @@ def classify_diagnostic(stderr: str, stdout: str, returncode: int) -> str:
 def codex_probe(binary: str, key: str) -> str:
     account = pwd.getpwnam("worksheet-worker")
     command = [
+        "/usr/bin/setpriv",
+        f"--reuid={account.pw_uid}",
+        f"--regid={account.pw_gid}",
+        "--clear-groups",
+        "--",
         binary, "exec", "--ignore-user-config", "--json", "--skip-git-repo-check",
         "-c", 'approval_policy="never"',
         "-c", 'web_search="disabled"',
@@ -88,29 +94,26 @@ def codex_probe(binary: str, key: str) -> str:
         "OPENAI_API_KEY": key,
     }
 
-    def drop_privileges() -> None:
-        os.initgroups(account.pw_name, account.pw_gid)
-        os.setgid(account.pw_gid)
-        os.setuid(account.pw_uid)
-
+    process = subprocess.Popen(
+        command,
+        cwd=STATE_DIR,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        result = subprocess.run(
-            command,
-            cwd=STATE_DIR,
-            env=environment,
-            input="Reply exactly CODEX_OK",
-            text=True,
-            capture_output=True,
-            timeout=75,
-            check=False,
-            preexec_fn=drop_privileges,
-        )
+        stdout, stderr = process.communicate("Reply exactly CODEX_OK", timeout=75)
     except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
         return "codex_cli=timeout"
-    if result.returncode:
-        return "codex_cli=" + classify_diagnostic(result.stderr, result.stdout, result.returncode)
+    if process.returncode:
+        return "codex_cli=" + classify_diagnostic(stderr, stdout, process.returncode)
     try:
-        events = [json.loads(line) for line in result.stdout.splitlines()]
+        events = [json.loads(line) for line in stdout.splitlines()]
     except (TypeError, ValueError):
         return "codex_cli=invalid_json"
     completed = any(event.get("type") == "turn.completed" for event in events)
