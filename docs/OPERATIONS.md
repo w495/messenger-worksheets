@@ -71,6 +71,17 @@ sudo journalctl -u worksheet-worker.service -n 100 --no-pager
 sudo systemctl show worksheet-worker.service -p ActiveState -p SubState
 ```
 
+Затем выполните один реальный запрос через локальный TLS RPC. Скрипт читает
+root-only конфигурацию, но не печатает секреты:
+
+```bash
+cd /home/operator/messenger-worksheets-install
+sudo PYTHONPATH=/opt/messenger-worksheets/app \
+  /opt/messenger-worksheets/venv/bin/python deployment/smoke_test_worker.py
+```
+
+Ожидаемый префикс результата — `worker_smoke_test_ok`.
+
 Шлюз запускается только после read-only проверки OAuth и отдельного разрешения
 на отправку пробного сообщения:
 
