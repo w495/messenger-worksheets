@@ -1,0 +1,38 @@
+[Unit]
+Description=Messenger Worksheets Codex Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=worksheet-worker
+Group=worksheet-worker
+WorkingDirectory=/opt/messenger-worksheets/app
+Environment=PYTHONPATH=/opt/messenger-worksheets/app
+Environment=HOME=/var/lib/messenger-worksheets-worker
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=LANG=C.UTF-8
+EnvironmentFile=/etc/messenger-worksheets/worker.env
+ExecStart=/opt/messenger-worksheets/venv/bin/python -m messenger_worksheets.codex_rpc
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+UMask=0077
+StateDirectory=messenger-worksheets-worker
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

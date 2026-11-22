@@ -1,0 +1,99 @@
+# Установка и эксплуатация
+
+## 1. Предварительная проверка
+
+На целевой ВМ должны выполняться команды:
+
+```bash
+python3 --version
+python3 -m ensurepip --version
+/usr/local/bin/codex --version
+systemctl --version
+openssl version
+```
+
+Если `ensurepip` недоступен:
+
+```bash
+sudo apt install python3.14-venv
+```
+
+Установщик проверяет это до запроса секретов. Если от предыдущего запуска
+осталось неполное виртуальное окружение без `pip`, установщик восстанавливает
+его через `python -m ensurepip --upgrade`.
+
+## 2. Установка
+
+```bash
+cd /home/operator/messenger-worksheets-install
+sudo bash deployment/install.sh
+```
+
+Установщик скрыто запросит:
+
+1. OAuth личного аккаунта Яндекс Мессенджера;
+2. OpenAI API key.
+
+Значения не должны передаваться в чат, аргументах команд или логах. После
+успешной установки ожидается:
+
+```text
+Installation prepared. Services were not enabled or started.
+```
+
+## 3. Что создаётся
+
+| Объект | Назначение |
+|---|---|
+| `/opt/messenger-worksheets/app` | общий код только для чтения |
+| `/opt/messenger-worksheets/messenger-client` | клиент, доступный шлюзу |
+| `/opt/messenger-worksheets/venv` | Python-зависимости |
+| `/etc/messenger-worksheets/gateway.env` | OAuth и RPC-настройки, mode `0600` |
+| `/etc/messenger-worksheets/worker.env` | OpenAI и RPC-настройки, mode `0600` |
+| `/var/lib/messenger-worksheets-gateway` | состояние шлюза |
+| `/var/lib/messenger-worksheets-worker` | состояние обработчика и Codex |
+
+## 4. Проверка после установки
+
+Не запускайте шлюз до проверки личности аккаунта. Сначала проверьте, что units
+загрузились и обработчик стартует:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start worksheet-worker.service
+sudo systemctl status --no-pager worksheet-worker.service
+```
+
+Диагностика без вывода секретов:
+
+```bash
+sudo journalctl -u worksheet-worker.service -n 100 --no-pager
+sudo systemctl show worksheet-worker.service -p ActiveState -p SubState
+```
+
+Шлюз запускается только после read-only проверки OAuth и отдельного разрешения
+на отправку пробного сообщения:
+
+```bash
+sudo systemctl start worksheet-gateway.service
+```
+
+Автозапуск включается после успешной end-to-end проверки:
+
+```bash
+sudo systemctl enable worksheet-worker.service worksheet-gateway.service
+```
+
+## 5. Остановка
+
+```bash
+sudo systemctl stop worksheet-gateway.service worksheet-worker.service
+```
+
+Остановка не удаляет состояние, секреты или сертификаты.
+
+## 6. Обновление
+
+Перед обновлением остановите шлюз и обработчик, обновите checkout и повторно
+запустите установщик. Он обновит код и зависимости, но не стартует службы сам.
+После этого повторите проверки раздела 4.

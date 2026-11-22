@@ -1,0 +1,30 @@
+# Local handoff and SSH trust material
+messenger-worksheets-handoff.tar.gz
+known_hosts
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime state and generated output
+*.sqlite3
+*.log
+state/
+task-results/
+file-receipts/
+
+# Secrets and private TLS material
+*.env
+*.key
+*.pem
+*.csr
+*.srl
+secrets/
+certificates/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
