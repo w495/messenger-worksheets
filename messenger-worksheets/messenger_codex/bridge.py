@@ -247,10 +247,21 @@ class Messenger:
             raise RuntimeError("Messenger did not confirm delivery")
 
     def send_file(self, parent: int, path: Path, payload: str, receipts: Path) -> None:
-        fields = {"chat_id": self.feed(parent), "path": str(path),
+        common = {"chat_id": self.feed(parent), "path": str(path),
                   "story_id": f"task-{payload}", "payload_id": payload, "receipt_dir": str(receipts)}
-        preview = self.client.send_document(**fields)
-        result = self.client.send_document(**fields, confirm_fingerprint=preview["fingerprint"])
+        with path.open("rb") as stream:
+            is_png = stream.read(8) == b"\x89PNG\r\n\x1a\n"
+        if is_png:
+            fields = {**common, "text": f"Изображение: {path.name}"}
+            preview = self.client.send_image_with_caption(**fields)
+            result = self.client.send_image_with_caption(
+                **fields, confirm_fingerprint=preview["fingerprint"],
+            )
+        else:
+            preview = self.client.send_document(**common)
+            result = self.client.send_document(
+                **common, confirm_fingerprint=preview["fingerprint"],
+            )
         if result["outcome"] not in {"confirmed", "duplicate"}:
             raise RuntimeError("Messenger did not confirm file delivery")
 

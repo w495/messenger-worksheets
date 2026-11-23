@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from pathlib import Path
+import tempfile
+import unittest
+
+from messenger_codex.bridge import Messenger
+
+
+class FakeClient:
+    def __init__(self):
+        self.operations = []
+
+    def send_image_with_caption(self, **kwargs):
+        self.operations.append(("image", kwargs))
+        if "confirm_fingerprint" not in kwargs:
+            return {"fingerprint": "image-fingerprint"}
+        return {"outcome": "confirmed"}
+
+    def send_document(self, **kwargs):
+        self.operations.append(("document", kwargs))
+        if "confirm_fingerprint" not in kwargs:
+            return {"fingerprint": "document-fingerprint"}
+        return {"outcome": "confirmed"}
+
+
+class ArtifactDeliveryTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.messenger = object.__new__(Messenger)
+        self.messenger.chat = "0/0/00000000-0000-0000-0000-000000000000"
+        self.messenger.thread_chat_id = lambda chat, parent: chat
+        self.messenger.client = FakeClient()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_png_uses_native_image(self):
+        image = self.root / "result.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\nrest")
+        self.messenger.send_file(0, image, "00000000-0000-0000-0000-000000000001", self.root)
+        self.assertEqual([kind for kind, _ in self.messenger.client.operations], ["image", "image"])
+
+    def test_non_png_uses_document(self):
+        document = self.root / "result.txt"
+        document.write_text("ok", encoding="utf-8")
+        self.messenger.send_file(0, document, "00000000-0000-0000-0000-000000000002", self.root)
+        self.assertEqual([kind for kind, _ in self.messenger.client.operations], ["document", "document"])
+
+
+if __name__ == "__main__":
+    unittest.main()
