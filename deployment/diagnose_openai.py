@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import pwd
@@ -37,18 +38,76 @@ def load_worker_environment() -> dict[str, str]:
     return values
 
 
-def api_probe(key: str) -> str:
+def api_probe(key: str) -> tuple[str, list[str]]:
     request = Request(
         "https://api.openai.com/v1/models",
         headers={"Authorization": "Bearer " + key},
     )
     try:
         with build_opener(ProxyHandler({})).open(request, timeout=20) as response:
-            return f"openai_api_http={response.status}"
+            body = response.read(2 * 1024 * 1024)
+            payload = json.loads(body)
+            models = [
+                item["id"]
+                for item in payload.get("data", [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+            return f"openai_api_http={response.status}", models
     except HTTPError as error:
-        return f"openai_api_http={error.code}"
+        return f"openai_api_http={error.code}", []
     except URLError as error:
-        return f"openai_api_network_error={type(error.reason).__name__}"
+        return f"openai_api_network_error={type(error.reason).__name__}", []
+
+
+def select_responses_model(models: list[str]) -> str | None:
+    excluded = ("audio", "image", "realtime", "search", "transcribe", "tts")
+    codex = sorted(
+        model for model in models
+        if model.startswith("gpt-") and "codex" in model
+        and not any(fragment in model for fragment in excluded)
+    )
+    if codex:
+        return codex[-1]
+    general = sorted(
+        model for model in models
+        if model.startswith("gpt-") and not any(fragment in model for fragment in excluded)
+    )
+    return general[-1] if general else None
+
+
+def safe_identifier(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", value):
+        return "unknown"
+    return value
+
+
+def responses_probe(key: str, model: str) -> str:
+    body = json.dumps({
+        "model": model,
+        "input": "Reply exactly API_OK",
+        "max_output_tokens": 128,
+        "store": False,
+    }).encode()
+    request = Request(
+        "https://api.openai.com/v1/responses",
+        data=body,
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+    )
+    try:
+        with build_opener(ProxyHandler({})).open(request, timeout=45) as response:
+            response.read(1024 * 1024)
+            return f"responses_api_http={response.status}"
+    except HTTPError as error:
+        raw = error.read(256 * 1024)
+        try:
+            details = json.loads(raw).get("error", {})
+        except (TypeError, ValueError):
+            details = {}
+        error_type = safe_identifier(details.get("type"))
+        error_code = safe_identifier(details.get("code"))
+        return f"responses_api_http={error.code} error_type={error_type} error_code={error_code}"
+    except URLError as error:
+        return f"responses_api_network_error={type(error.reason).__name__}"
 
 
 def resolve_native_codex(configured: str) -> str:
@@ -143,7 +202,14 @@ def main() -> None:
     if os.geteuid() != 0:
         raise SystemExit("Run this diagnostic with sudo.")
     values = load_worker_environment()
-    print(api_probe(values["WORKSHEET_CODEX_API_KEY"]))
+    api_status, models = api_probe(values["WORKSHEET_CODEX_API_KEY"])
+    print(api_status)
+    model = select_responses_model(models)
+    if model is None:
+        print("responses_api=skipped_no_compatible_model")
+    else:
+        print("responses_model=" + safe_identifier(model))
+        print(responses_probe(values["WORKSHEET_CODEX_API_KEY"], model))
     binary = resolve_native_codex(values["WORKSHEET_CODEX_BINARY"])
     print("codex_binary=native")
     print(codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"]))
