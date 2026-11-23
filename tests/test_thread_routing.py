@@ -6,7 +6,9 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from messenger_codex.bridge import Bridge, CodexTurnError, Messenger, PROGRESS_SECONDS
+from messenger_codex.bridge import (
+    Bridge, CodexTurnError, Messenger, PROGRESS_SECONDS, SPINNER_VARIANTS,
+)
 
 
 class FakeMessenger:
@@ -74,6 +76,10 @@ class ThreadRoutingTest(unittest.TestCase):
 
     def test_spinner_updates_every_100_milliseconds(self):
         self.assertEqual(PROGRESS_SECONDS, 0.1)
+
+    def test_fill_spinner_uses_six_selected_levels(self):
+        self.assertIn(("▁", "▂", "▃", "▅", "▆", "▇"), SPINNER_VARIANTS)
+        self.assertNotIn(("▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"), SPINNER_VARIANTS)
 
     def test_progress_edits_one_message_and_finishes(self):
         database = sqlite3.connect(":memory:")
