@@ -452,8 +452,9 @@ class Bridge:
         return session
 
     def _is_owner_task(self, message: dict) -> bool:
+        allow_any = os.environ.get("WORKSHEET_ALLOW_TASKS_FROM_ANY_PARTICIPANT") == "true"
         return (
-            message.get("author_guid") == self.messenger.identity["guid"]
+            (allow_any or message.get("author_guid") == self.messenger.identity["guid"])
             and bool(TASK_REQUEST.search(message.get("text") or ""))
         )
 

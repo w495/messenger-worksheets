@@ -297,7 +297,16 @@ def main() -> None:
     print(responses_probe(values["WORKSHEET_CODEX_API_KEY"], model))
     binary = resolve_native_codex(values["WORKSHEET_CODEX_BINARY"])
     print("codex_binary=native")
-    print(codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"], model))
+    primary = codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"], model)
+    print(primary)
+    if primary != "codex_cli=ok":
+        for fallback in ("gpt-5.4", "gpt-5.2", "gpt-4.1"):
+            if fallback not in models:
+                continue
+            result = codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"], fallback)
+            print(f"fallback_model={fallback} {result}")
+            if result == "codex_cli=ok":
+                break
 
 
 if __name__ == "__main__":

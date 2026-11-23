@@ -32,4 +32,6 @@
 - добавлен официальный redacted `codex doctor --network-only` для API worker;
 - исправлена загрузка instance-specific chat/email в Messenger identity-check;
 - статусные сообщения и модельная самореференция переведены в безличный стиль;
+- local-user instance разрешает task/image-generation любому участнику по явной настройке;
+- API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - добавлены документация и локальная проверка репозитория.

@@ -137,8 +137,11 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
                      "-c", "permissions.messenger_task.network.enabled=false"))
     else:
         argv.extend(("--sandbox", "read-only"))
+    task_features = {"shell_tool", "unified_exec", "view_image"}
+    if os.environ.get("WORKSHEET_ENABLE_IMAGE_GENERATION") == "true":
+        task_features.add("image_generation")
     for feature in DISABLED_FEATURES:
-        if not request.task or feature not in {"shell_tool", "unified_exec", "view_image"}:
+        if not request.task or feature not in task_features:
             argv.extend(("--disable", feature))
     if provider == "local_user":
         for feature in LOCAL_USER_DISABLED_FEATURES:

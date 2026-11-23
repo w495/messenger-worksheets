@@ -167,12 +167,14 @@ def main() -> None:
     write_env(ETC / "gateway-api.env", {
         **common_gateway,
         "WORKSHEET_MESSENGER_CHAT_ID": resolved["api"],
+        "WORKSHEET_ALLOW_TASKS_FROM_ANY_PARTICIPANT": "false",
         "WORKSHEET_CODEX_WORKER_URL": "https://127.0.0.1:8443/v1/codex-worksheet-jobs",
         "WORKSHEET_CODEX_TRANSPORT_TOKEN": api_token,
     })
     write_env(local_gateway_path, {
         **common_gateway,
         "WORKSHEET_MESSENGER_CHAT_ID": resolved["local_user"],
+        "WORKSHEET_ALLOW_TASKS_FROM_ANY_PARTICIPANT": "true",
         "WORKSHEET_CODEX_WORKER_URL": "https://127.0.0.1:8444/v1/codex-worksheet-jobs",
         "WORKSHEET_CODEX_TRANSPORT_TOKEN": local_token,
     })
@@ -182,6 +184,7 @@ def main() -> None:
         "WORKSHEET_CODEX_BINARY": native_codex(),
         "WORKSHEET_CODEX_MODEL": local_model,
         "WORKSHEET_CODEX_REASONING_EFFORT": local_effort,
+        "WORKSHEET_ENABLE_IMAGE_GENERATION": "true",
         "WORKSHEET_CODEX_LISTEN": "127.0.0.1",
         "WORKSHEET_CODEX_PORT": "8444",
         "WORKSHEET_CODEX_TLS_CERT": str(ETC / "local-user/server.crt"),
