@@ -46,7 +46,10 @@ class ArtifactDeliveryTest(unittest.TestCase):
         image = self.root / "result.png"
         image.write_bytes(b"\x89PNG\r\n\x1a\nrest")
         self.messenger.send_file(0, image, "00000000-0000-0000-0000-000000000001", self.root)
-        self.assertEqual([kind for kind, _ in self.messenger.client.operations], ["image", "image"])
+        self.assertEqual(
+            [kind for kind, _ in self.messenger.client.operations],
+            ["image", "image", "document", "document"],
+        )
 
     def test_non_png_uses_document(self):
         document = self.root / "result.txt"

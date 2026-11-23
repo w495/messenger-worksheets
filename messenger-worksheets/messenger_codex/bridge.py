@@ -247,12 +247,22 @@ class Messenger:
             raise RuntimeError("Messenger did not confirm delivery")
 
     def send_file(self, parent: int, path: Path, payload: str, receipts: Path) -> None:
-        common = {"chat_id": self.feed(parent), "path": str(path),
-                  "story_id": f"task-{payload}", "payload_id": payload, "receipt_dir": str(receipts)}
+        payload_uuid = uuid.UUID(payload)
+        common = {"chat_id": self.feed(parent), "path": str(path), "receipt_dir": str(receipts)}
+        document_fields = {
+            **common,
+            "story_id": f"doc-{payload}",
+            "payload_id": str(uuid.uuid5(payload_uuid, "document")),
+        }
         with path.open("rb") as stream:
             is_png = stream.read(8) == b"\x89PNG\r\n\x1a\n"
         if is_png:
-            fields = {**common, "text": f"Изображение: {path.name}"}
+            fields = {
+                **common,
+                "story_id": f"img-{payload}",
+                "payload_id": str(uuid.uuid5(payload_uuid, "image")),
+                "text": f"Изображение: {path.name}",
+            }
             try:
                 preview = self.client.send_image_with_caption(**fields)
             except (OSError, ValueError) as error:
@@ -262,13 +272,14 @@ class Messenger:
                 result = self.client.send_image_with_caption(
                     **fields, confirm_fingerprint=preview["fingerprint"],
                 )
-        if not is_png:
-            preview = self.client.send_document(**common)
-            result = self.client.send_document(
-                **common, confirm_fingerprint=preview["fingerprint"],
-            )
+                if result["outcome"] not in {"confirmed", "duplicate"}:
+                    raise RuntimeError("Messenger did not confirm image delivery")
+        preview = self.client.send_document(**document_fields)
+        result = self.client.send_document(
+            **document_fields, confirm_fingerprint=preview["fingerprint"],
+        )
         if result["outcome"] not in {"confirmed", "duplicate"}:
-            raise RuntimeError("Messenger did not confirm file delivery")
+            raise RuntimeError("Messenger did not confirm document delivery")
 
     def download_images(self, media: list[dict], directory: Path) -> tuple[Path, ...]:
         from client import MessengerError
