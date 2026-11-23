@@ -43,6 +43,7 @@
 - оба gateway отправляют статусы, ответы и artifacts в тред исходного сообщения;
 - task progress редактирует одно сообщение с BSD spinner и завершает его `[+] Готово.`;
 - spinner случайно выбирается из восьми стилей и сохраняется для task в SQLite;
+- анимированные spinner-кадры выводятся без квадратных скобок;
 - progress timestamp при отсутствии в push-response сверяется по payload_id через history;
 - inclusive history cursor/MaxTimestamp boundaries пропускаются как дубли вместо retry-loop;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;

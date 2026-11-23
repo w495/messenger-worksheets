@@ -66,9 +66,9 @@ class ThreadRoutingTest(unittest.TestCase):
             bridge.progress(0, 123, 123, "Задача выполняется …")
             bridge.progress(0, 123, 123, "Готово.", final=True)
         self.assertEqual(len(messenger.sent), 1)
-        self.assertTrue(messenger.sent[0][1].startswith("`[-]`"))
+        self.assertTrue(messenger.sent[0][1].startswith("`-`"))
         self.assertEqual(len(messenger.edited), 2)
-        self.assertTrue(messenger.edited[0][2].startswith("`[\\]`"))
+        self.assertTrue(messenger.edited[0][2].startswith("`\\`"))
         self.assertEqual(messenger.edited[1][2], "`[+]` Готово.")
 
     def test_history_skips_inclusive_cursor_boundaries(self):
