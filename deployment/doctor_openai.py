@@ -33,14 +33,7 @@ def main() -> None:
         "--json",
         "--network-only",
         "-c", 'model="gpt-5.3-codex"',
-        "-c", 'model_provider="direct_openai"',
-        "-c", 'model_providers.direct_openai.name="Direct OpenAI API"',
-        "-c", 'model_providers.direct_openai.base_url="https://api.openai.com/v1"',
-        "-c", 'model_providers.direct_openai.wire_api="responses"',
-        "-c", 'model_providers.direct_openai.env_key="OPENAI_API_KEY"',
-        "-c", "model_providers.direct_openai.requires_openai_auth=false",
-        "-c", "model_context_window=16384",
-        "-c", "model_auto_compact_token_limit=12000",
+        "-c", 'model_provider="openai"',
     ]
     environment = {
         "HOME": str(STATE_DIR),

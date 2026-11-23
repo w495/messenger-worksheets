@@ -94,6 +94,10 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
         ),
     ]
     if provider == "openai":
+        argv.extend(("-c", 'model_provider="openai"'))
+        if model := os.environ.get("WORKSHEET_CODEX_MODEL"):
+            argv.extend(("--model", model))
+    elif provider == "direct_openai":
         argv.extend((
             "-c", 'model_provider="direct_openai"',
             "-c", 'model_providers.direct_openai.name="Direct OpenAI API"',
@@ -222,7 +226,7 @@ def execute(request: Request, state_dir: Path) -> dict:
         env = {key: os.environ[key] for key in ("HOME", "PATH", "LANG", "SSL_CERT_FILE", "XDG_RUNTIME_DIR")
                if key in os.environ}
         provider = os.environ.get("WORKSHEET_CODEX_PROVIDER", "endpoint")
-        if provider == "openai":
+        if provider in {"openai", "direct_openai"}:
             if key := os.environ.get(MODEL_KEY):
                 env["OPENAI_API_KEY"] = key
         elif provider == "endpoint":

@@ -214,8 +214,20 @@ def structured_signals(stderr: str, stdout: str) -> str:
     return " ".join(parts) if parts else "signals=none"
 
 
-def codex_probe(binary: str, key: str, model: str) -> str:
+def codex_probe(binary: str, key: str, model: str, *, direct: bool = False) -> str:
     account = pwd.getpwnam("worksheet-worker")
+    provider_config = ["-c", 'model_provider="openai"']
+    if direct:
+        provider_config = [
+            "-c", 'model_provider="direct_openai"',
+            "-c", 'model_providers.direct_openai.name="Direct OpenAI API"',
+            "-c", 'model_providers.direct_openai.base_url="https://api.openai.com/v1"',
+            "-c", 'model_providers.direct_openai.wire_api="responses"',
+            "-c", 'model_providers.direct_openai.env_key="OPENAI_API_KEY"',
+            "-c", "model_providers.direct_openai.requires_openai_auth=false",
+            "-c", "model_context_window=16384",
+            "-c", "model_auto_compact_token_limit=12000",
+        ]
     command = [
         "/usr/bin/setpriv",
         f"--reuid={account.pw_uid}",
@@ -228,14 +240,7 @@ def codex_probe(binary: str, key: str, model: str) -> str:
         "-c", "project_doc_max_bytes=0",
         "-c", 'shell_environment_policy.inherit="none"',
         "-c", 'developer_instructions="Reply exactly CODEX_OK"',
-        "-c", 'model_provider="direct_openai"',
-        "-c", 'model_providers.direct_openai.name="Direct OpenAI API"',
-        "-c", 'model_providers.direct_openai.base_url="https://api.openai.com/v1"',
-        "-c", 'model_providers.direct_openai.wire_api="responses"',
-        "-c", 'model_providers.direct_openai.env_key="OPENAI_API_KEY"',
-        "-c", "model_providers.direct_openai.requires_openai_auth=false",
-        "-c", "model_context_window=16384",
-        "-c", "model_auto_compact_token_limit=12000",
+        *provider_config,
         "-c", f'model_reasoning_effort="{TARGET_REASONING_EFFORT}"',
         "--model", model,
         "--sandbox", "read-only",
@@ -297,6 +302,7 @@ def main() -> None:
     print(responses_probe(values["WORKSHEET_CODEX_API_KEY"], model))
     binary = resolve_native_codex(values["WORKSHEET_CODEX_BINARY"])
     print("codex_binary=native")
+    print("codex_provider=openai")
     primary = codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"], model)
     print(primary)
     if primary != "codex_cli=ok":
@@ -307,6 +313,9 @@ def main() -> None:
             print(f"fallback_model={fallback} {result}")
             if result == "codex_cli=ok":
                 break
+        print("direct_provider_probe=" + codex_probe(
+            binary, values["WORKSHEET_CODEX_API_KEY"], model, direct=True,
+        ))
 
 
 if __name__ == "__main__":
