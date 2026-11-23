@@ -46,6 +46,11 @@ for module in codex_rpc.py codex_worker.py personal_messenger.py; do
         "${repo_root}/messenger-worksheets/messenger_worksheets/${module}" \
         "/opt/messenger-worksheets/app/messenger_worksheets/${module}"
 done
+for module in client.py transport.py; do
+    install -m 0640 -o root -g worksheet-gateway \
+        "${repo_root}/messenger-client/${module}" \
+        "/opt/messenger-worksheets/messenger-client/${module}"
+done
 install -m 0644 -o root -g root \
     "${repo_root}/messenger-worksheets/messenger_worksheets/cloud_gateway.py" \
     /opt/messenger-worksheets/app/messenger_worksheets/cloud_gateway.py

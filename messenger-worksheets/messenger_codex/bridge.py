@@ -305,6 +305,20 @@ class Messenger:
         if result["outcome"] != "confirmed":
             raise RuntimeError("Messenger did not confirm status edit")
 
+    def react(self, parent: int, timestamp: int, reaction: str, *, replace: bool = False) -> None:
+        fields = {
+            "chat_id": self.feed(parent),
+            "timestamp": timestamp,
+            "reaction": reaction,
+            "operation": "replace" if replace else "add",
+        }
+        preview = self.client.set_reaction(**fields)
+        result = self.client.set_reaction(
+            **fields, confirm_fingerprint=preview["fingerprint"],
+        )
+        if result["outcome"] not in {"confirmed", "duplicate"}:
+            raise RuntimeError("Messenger did not confirm reaction")
+
     def send_file(self, parent: int, path: Path, payload: str, receipts: Path) -> None:
         payload_uuid = uuid.UUID(payload)
         common = {"chat_id": self.feed(parent), "path": str(path), "receipt_dir": str(receipts)}
@@ -565,6 +579,10 @@ class Bridge:
         ).fetchone()
         if record is None:
             try:
+                self.messenger.react(parent, stamp, "👀")
+            except Exception as error:
+                print(f"reaction_start_failed {type(error).__name__}", flush=True)
+            try:
                 self.progress(
                     parent, stamp, delivery_parent, "Сообщение принято в обработку …",
                 )
@@ -607,6 +625,10 @@ class Bridge:
             self.progress(parent, stamp, delivery_parent, "Готово.", final=True)
         except Exception as error:
             print(f"progress_completion_failed {type(error).__name__}", flush=True)
+        try:
+            self.messenger.react(parent, stamp, "✅", replace=True)
+        except Exception as error:
+            print(f"reaction_completion_failed {type(error).__name__}", flush=True)
         with self.db:
             self.db.execute(
                 "UPDATE replies SET draft = NULL WHERE parent = ? AND incoming = ?",
