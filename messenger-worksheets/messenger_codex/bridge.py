@@ -22,6 +22,8 @@ LOGIN = "operator"
 PAGE_SIZE = 100
 POLL_SECONDS = 10
 THREAD_DISCOVERY_SECONDS = 60
+PROGRESS_SECONDS = 2
+SPINNER_FRAMES = ("[-]", "[\\]", "[|]", "[/]")
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 CODEX = Path.home() / ".local/bin/codex"
 TASK_REQUEST = re.compile(
@@ -237,7 +239,7 @@ class Messenger:
             payload["MaxTimestamp"] = oldest
         return sorted(messages.items())
 
-    def send(self, parent: int, reply: str, payload_id: str) -> None:
+    def send(self, parent: int, reply: str, payload_id: str) -> int:
         fields = {"chat_id": self.chat, "thread_ts": parent or None, "payload_id": payload_id}
         preview = self.client.send_message(reply, **fields)
         result = self.client.send_message(
@@ -245,6 +247,20 @@ class Messenger:
         )
         if result["outcome"] != "confirmed" or result["chat_id"] != self.feed(parent):
             raise RuntimeError("Messenger did not confirm delivery")
+        info = result.get("message_info") or {}
+        timestamp = info.get("Timestamp") or info.get("timestamp")
+        if type(timestamp) is not int or timestamp <= 0:
+            raise RuntimeError("Messenger did not return the delivered message timestamp")
+        return timestamp
+
+    def edit(self, parent: int, timestamp: int, text: str) -> None:
+        fields = {"chat_id": self.feed(parent), "timestamp": timestamp, "text": text}
+        preview = self.client.edit_message(**fields)
+        result = self.client.edit_message(
+            **fields, confirm_fingerprint=preview["fingerprint"],
+        )
+        if result["outcome"] != "confirmed":
+            raise RuntimeError("Messenger did not confirm status edit")
 
     def send_file(self, parent: int, path: Path, payload: str, receipts: Path) -> None:
         payload_uuid = uuid.UUID(payload)
@@ -366,6 +382,11 @@ class Bridge:
                 parent INTEGER, incoming INTEGER, path TEXT,
                 PRIMARY KEY (parent, incoming, path)
             );
+            CREATE TABLE IF NOT EXISTS progress (
+                parent INTEGER, incoming INTEGER, delivery_parent INTEGER,
+                message_ts INTEGER, frame INTEGER, payload TEXT UNIQUE,
+                PRIMARY KEY (parent, incoming)
+            );
         """)
         with db:
             settings = db.execute("SELECT chat, started FROM settings").fetchone()
@@ -430,6 +451,37 @@ class Bridge:
             self.messenger.send(parent if delivery_parent is None else delivery_parent, text, payload)
             self._mark_update_sent(payload)
 
+    def progress(
+        self,
+        parent: int,
+        stamp: int,
+        delivery_parent: int,
+        label: str,
+        *,
+        final: bool = False,
+    ) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO progress VALUES (?,?,?,?,?,?)",
+                (parent, stamp, delivery_parent, None, -1, str(uuid.uuid4())),
+            )
+        message_ts, frame, payload = self.db.execute(
+            "SELECT message_ts, frame, payload FROM progress WHERE parent=? AND incoming=?",
+            (parent, stamp),
+        ).fetchone()
+        next_frame = frame if final else (frame + 1) % len(SPINNER_FRAMES)
+        marker = "[+]" if final else SPINNER_FRAMES[next_frame]
+        text = f"`{marker}` {label}"
+        if message_ts is None:
+            message_ts = self.messenger.send(delivery_parent, text, payload)
+        else:
+            self.messenger.edit(delivery_parent, message_ts, text)
+        with self.db:
+            self.db.execute(
+                "UPDATE progress SET message_ts=?, frame=? WHERE parent=? AND incoming=?",
+                (message_ts, next_frame, parent, stamp),
+            )
+
     def _update_payload(self, parent: int, stamp: int, stage: str) -> str | None:
         with self.db:
             self.db.execute(
@@ -455,9 +507,8 @@ class Bridge:
             (parent, stamp),
         ).fetchone()
         if record is None:
-            self.status(
-                parent, stamp, "accepted", "Сообщение принято в обработку.",
-                delivery_parent=delivery_parent,
+            self.progress(
+                parent, stamp, delivery_parent, "Сообщение принято в обработку …",
             )
             print(f"message_accepted timestamp_us={stamp}", flush=True)
             files = ()
@@ -490,6 +541,10 @@ class Bridge:
         except Exception as error:
             print(f"reply_delivery_retry {type(error).__name__}", flush=True)
             raise
+        try:
+            self.progress(parent, stamp, delivery_parent, "Готово.", final=True)
+        except Exception as error:
+            print(f"progress_completion_failed {type(error).__name__}", flush=True)
         with self.db:
             self.db.execute(
                 "UPDATE replies SET draft = NULL WHERE parent = ? AND incoming = ?",
@@ -509,9 +564,8 @@ class Bridge:
     def _task(
         self, parent: int, stamp: int, message: dict, *, delivery_parent: int,
     ) -> tuple[str, tuple[Path, ...]]:
-        self.status(
-            parent, stamp, "executing", "Задача запущена в Codex.",
-            delivery_parent=delivery_parent,
+        self.progress(
+            parent, stamp, delivery_parent, "Задача запущена …",
         )
         with TemporaryDirectory(prefix="messenger-task-") as directory:
             job = Path(directory).resolve()
@@ -523,9 +577,8 @@ class Bridge:
             prompt = message_prompt(message, parent, len(images))
             reply, _ = codex_answer(
                 job, prompt, None, images,
-                progress=lambda: self.status(
-                    parent, stamp, "working", "Codex ещё выполняет задачу.",
-                    delivery_parent=delivery_parent,
+                progress=lambda: self.progress(
+                    parent, stamp, delivery_parent, "Задача выполняется …",
                 ),
             )
             return reply, self._preserve_files(output_dir)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import fcntl
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ from tempfile import TemporaryDirectory
 import time
 import uuid
 
-from messenger_codex.bridge import Bridge, POLL_SECONDS, message_prompt
+from messenger_codex.bridge import Bridge, POLL_SECONDS, PROGRESS_SECONDS, message_prompt
 from .codex_rpc import submit
 from .codex_worker import MAX_RESULT_BYTES
 from .personal_messenger import CHAT, PersonalMessenger
@@ -69,23 +70,33 @@ class CloudBridge(Bridge):
     def _task(
         self, parent: int, stamp: int, message: dict, *, delivery_parent: int,
     ) -> tuple[str, tuple[Path, ...]]:
-        self.status(
-            parent, stamp, "executing", "Задача запущена на облачной ВМ.",
-            delivery_parent=delivery_parent,
+        self.progress(
+            parent, stamp, delivery_parent, "Задача запущена …",
         )
         task_url = os.environ.get("WORKSHEET_TASK_WORKER_URL")
         task_token = os.environ.get("WORKSHEET_TASK_WORKER_TRANSPORT_TOKEN")
         if bool(task_url) != bool(task_token):
             raise ValueError("task worker routing is incomplete")
-        result = self.transfer(
-            parent,
-            stamp,
-            message,
-            task=True,
-            session=None,
-            worker_url=task_url,
-            transport_token=task_token,
-        )
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="worksheet-task") as executor:
+            future = executor.submit(
+                self.transfer,
+                parent,
+                stamp,
+                message,
+                task=True,
+                session=None,
+                worker_url=task_url,
+                transport_token=task_token,
+            )
+            while True:
+                try:
+                    result = future.result(timeout=PROGRESS_SECONDS)
+                    break
+                except FutureTimeout:
+                    try:
+                        self.progress(parent, stamp, delivery_parent, "Задача выполняется …")
+                    except Exception as error:
+                        print(f"progress_update_failed {type(error).__name__}", flush=True)
         with TemporaryDirectory(prefix="cloud-gateway-results-") as directory:
             output = Path(directory)
             remaining = MAX_RESULT_BYTES

@@ -41,6 +41,7 @@
 - invalid PNG preview безопасно откатывается к document и не блокирует очередь gateway;
 - валидный PNG отправляется двумя сообщениями: native image и downloadable document;
 - оба gateway отправляют статусы, ответы и artifacts в тред исходного сообщения;
+- task progress редактирует одно сообщение с BSD spinner и завершает его `[+] Готово.`;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;
 - старый API-chat переведён на text-only direct Responses adapter с локальными UUID-сессиями;
