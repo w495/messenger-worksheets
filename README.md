@@ -60,3 +60,7 @@ sudo bash deployment/install.sh
 
 Секреты, сертификаты, runtime-state, SSH `known_hosts` и исходный handoff-архив
 исключены из Git.
+
+Bundled Messenger client sources are intentionally absent from the public
+repository. Place authorized `client.py` and `transport.py` modules in
+`messenger-client/` before deployment.
