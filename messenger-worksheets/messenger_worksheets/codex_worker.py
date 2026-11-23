@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import time
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request as HTTPRequest, build_opener
 import uuid
 
 from messenger_codex.bridge import DISABLED_FEATURES, INSTRUCTIONS, TASK_INSTRUCTIONS
@@ -24,6 +29,14 @@ IMAGE_TYPES = {"jpeg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp"}
 MODEL_KEY = "WORKSHEET_CODEX_API_KEY"
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 LOCAL_USER_DISABLED_FEATURES = ("apps", "browser_use", "computer_use", "remote_plugin")
+DIRECT_HISTORY_ITEMS = 20
+DIRECT_HISTORY_BYTES = 64 * 1024
+DIRECT_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class CodexExecutionError(RuntimeError):
@@ -215,7 +228,159 @@ def result_files(output: Path) -> list[dict]:
     return results
 
 
-def execute(request: Request, state_dir: Path) -> dict:
+def _validate_direct_history(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) > DIRECT_HISTORY_ITEMS:
+        raise ValueError("invalid direct session history")
+    messages = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"role", "text"}:
+            raise ValueError("invalid direct session item")
+        role, text = item["role"], item["text"]
+        if role not in {"user", "assistant"} or not isinstance(text, str) or len(text) > 8000:
+            raise ValueError("invalid direct session content")
+        messages.append({"role": role, "text": text})
+    return messages
+
+
+def _direct_history_json(messages: list[dict[str, str]]) -> str:
+    trimmed = messages[-DIRECT_HISTORY_ITEMS:]
+    payload = json.dumps(trimmed, ensure_ascii=False).encode()
+    while len(payload) > DIRECT_HISTORY_BYTES and len(trimmed) > 2:
+        trimmed = trimmed[2:]
+        payload = json.dumps(trimmed, ensure_ascii=False).encode()
+    if len(payload) > DIRECT_HISTORY_BYTES:
+        raise ValueError("direct session history exceeds its byte limit")
+    return payload.decode()
+
+
+def _direct_database(state_dir: Path) -> sqlite3.Connection:
+    path = state_dir / "direct-sessions.sqlite3"
+    database = sqlite3.connect(path, timeout=30)
+    os.chmod(path, 0o600)
+    database.executescript("""
+        PRAGMA secure_delete = ON;
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE IF NOT EXISTS sessions (
+            session TEXT PRIMARY KEY,
+            history_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS turns (
+            job_id TEXT PRIMARY KEY,
+            result_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+    """)
+    return database
+
+
+def _direct_transcript(messages: list[dict[str, str]], current: str) -> str:
+    entries = [f"[{item['role'].upper()}]\n{item['text']}" for item in messages]
+    entries.append(f"[USER]\n{current}")
+    transcript = "\n\n".join(entries)
+    return transcript[-48 * 1024:]
+
+
+def execute_direct_response(request: Request, state_dir: Path, job_id: str | None) -> dict:
+    if request.task:
+        return {
+            "text": "В API-режиме доступны текстовые ответы без Codex tools и файловых задач.",
+            "session": None,
+            "files": [],
+        }
+    job_id = job_id or str(uuid.uuid4())
+    with closing(_direct_database(state_dir)) as database:
+        cached = database.execute("SELECT result_json FROM turns WHERE job_id=?", (job_id,)).fetchone()
+        if cached is not None:
+            return json.loads(cached[0])
+        session = request.session or str(uuid.uuid4())
+        record = database.execute("SELECT history_json FROM sessions WHERE session=?", (session,)).fetchone()
+        if request.session and record is None:
+            session = str(uuid.uuid4())
+        history = _validate_direct_history(json.loads(record[0])) if record is not None else []
+    content: list[dict[str, str]] = [
+        {"type": "input_text", "text": _direct_transcript(history, request.text)},
+    ]
+    for suffix, data in request.images:
+        media_type = "image/jpeg" if suffix == ".jpg" else f"image/{suffix.removeprefix('.')}"
+        content.append({
+            "type": "input_image",
+            "image_url": f"data:{media_type};base64,{base64.b64encode(data).decode('ascii')}",
+        })
+    model = os.environ["WORKSHEET_CODEX_MODEL"]
+    effort = os.environ.get("WORKSHEET_CODEX_REASONING_EFFORT", "medium")
+    if effort not in REASONING_EFFORTS:
+        raise ValueError("unsupported direct reasoning effort")
+    body = json.dumps({
+        "model": model,
+        "instructions": INSTRUCTIONS + f" Текущая модель: {model}. На прямой вопрос назови эту модель.",
+        "input": [{"role": "user", "content": content}],
+        "store": False,
+        "tools": [],
+        "tool_choice": "none",
+        "max_output_tokens": 4096,
+        "reasoning": {"effort": effort},
+    }, ensure_ascii=False).encode()
+    http_request = HTTPRequest(
+        "https://api.openai.com/v1/responses",
+        data=body,
+        headers={
+            "Authorization": "Bearer " + os.environ[MODEL_KEY],
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with build_opener(NoRedirect()).open(http_request, timeout=180) as response:
+            raw = response.read(DIRECT_RESPONSE_BYTES + 1)
+    except HTTPError as error:
+        raise CodexExecutionError(f"responses_http_{error.code}") from None
+    except URLError:
+        raise CodexExecutionError("responses_connection") from None
+    if len(raw) > DIRECT_RESPONSE_BYTES:
+        raise CodexExecutionError("responses_too_large")
+    result = json.loads(raw)
+    if result.get("status") != "completed":
+        raise CodexExecutionError("responses_incomplete")
+    parts = [
+        item.get("text", "")
+        for output in result.get("output", [])
+        if isinstance(output, dict) and output.get("type") == "message"
+        and output.get("role") == "assistant"
+        for item in output.get("content", [])
+        if isinstance(item, dict) and item.get("type") == "output_text"
+    ]
+    reply = "".join(parts).strip()[:6000]
+    if not reply:
+        raise CodexExecutionError("responses_empty")
+    history.extend(({"role": "user", "text": request.text}, {"role": "assistant", "text": reply}))
+    outcome = {"text": reply, "session": session, "files": []}
+    now = int(time.time())
+    with closing(_direct_database(state_dir)) as database:
+        database.execute("BEGIN IMMEDIATE")
+        cached = database.execute("SELECT result_json FROM turns WHERE job_id=?", (job_id,)).fetchone()
+        if cached is not None:
+            database.rollback()
+            return json.loads(cached[0])
+        database.execute(
+            "INSERT INTO sessions(session,history_json,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(session) DO UPDATE SET history_json=excluded.history_json, updated_at=excluded.updated_at",
+            (session, _direct_history_json(history), now),
+        )
+        database.execute(
+            "INSERT INTO turns(job_id,result_json,created_at) VALUES(?,?,?)",
+            (job_id, json.dumps(outcome, ensure_ascii=False), now),
+        )
+        database.execute(
+            "DELETE FROM turns WHERE job_id NOT IN "
+            "(SELECT job_id FROM turns ORDER BY created_at DESC LIMIT 1000)"
+        )
+        database.commit()
+    return outcome
+
+
+def execute(request: Request, state_dir: Path, job_id: str | None = None) -> dict:
+    if os.environ.get("WORKSHEET_CODEX_PROVIDER") == "responses_direct":
+        return execute_direct_response(request, state_dir, job_id)
     binary = Path(os.environ["WORKSHEET_CODEX_BINARY"]).resolve(strict=True)
     chat_workspace = state_dir / "chat"
     chat_workspace.mkdir(mode=0o700, parents=True, exist_ok=True)

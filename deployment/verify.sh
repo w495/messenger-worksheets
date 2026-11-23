@@ -14,5 +14,6 @@ python3 -m compileall -q messenger-worksheets messenger-client \
     deployment/check_messenger.py deployment/doctor_openai.py deployment/provision_instances.py \
     deployment/smoke_test_worker.py deployment/diagnose_openai.py deployment/login_codex.py \
     deployment/update_messenger_oauth.py
+PYTHONPATH=messenger-worksheets python3 -m unittest discover -s tests -p 'test_*.py'
 
 echo "Repository checks passed."

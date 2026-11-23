@@ -61,7 +61,7 @@ def run_request(body: bytes, state_dir: Path) -> dict:
         if stored["digest"] != digest:
             raise ValueError("conflicting job replay")
         return stored["result"]
-    result = execute(Request.decode(spec["input"]), state_dir)
+    result = execute(Request.decode(spec["input"]), state_dir, job_id=job_id)
     with NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache, delete=False) as stream:
         json.dump({"digest": digest, "result": result}, stream)
         temporary = Path(stream.name)

@@ -36,5 +36,6 @@
 - добавлен отдельный sandbox-admin instance для task-запросов всех участников без доступа к `operator` home;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;
+- старый API-chat переведён на text-only direct Responses adapter с локальными UUID-сессиями;
 - task prompt запрещает объявлять изображение готовым без реального файла в `out/`;
 - добавлены документация и локальная проверка репозитория.

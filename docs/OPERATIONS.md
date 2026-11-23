@@ -99,6 +99,8 @@ sudo -n /usr/local/sbin/worksheet-admin start-local-instance
 
 API instance использует порт `8443` и `gateway-api.env`; local-user instance —
 порт `8444` и `gateway-local-user.env`. StateDirectory и RPC token раздельные.
+API instance использует text-only direct Responses adapter (`store=false`,
+локальная bounded history, без Codex tools и файловых задач).
 В local-user instance task-режим и image generation разрешены любому участнику
 чата; это даёт всем участникам возможность расходовать модельную квоту.
 

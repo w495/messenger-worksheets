@@ -150,6 +150,10 @@ def main() -> None:
     api_token = worker["WORKSHEET_CODEX_TRANSPORT_TOKEN"]
     if api_token != legacy["WORKSHEET_CODEX_TRANSPORT_TOKEN"] or len(api_token) < 32:
         raise ValueError("legacy API transport token is inconsistent")
+    worker["WORKSHEET_CODEX_PROVIDER"] = "responses_direct"
+    worker["WORKSHEET_CODEX_MODEL"] = "gpt-5.3-codex"
+    worker["WORKSHEET_CODEX_REASONING_EFFORT"] = "high"
+    write_env(API_WORKER_ENV, worker)
     local_gateway_path = ETC / "gateway-local-user.env"
     if local_gateway_path.exists():
         local_token = read_env(local_gateway_path).get("WORKSHEET_CODEX_TRANSPORT_TOKEN", "")
