@@ -102,6 +102,26 @@ API instance использует порт `8443` и `gateway-api.env`; local-us
 В local-user instance task-режим и image generation разрешены любому участнику
 чата; это даёт всем участникам возможность расходовать модельную квоту.
 
+### Sandbox-admin для всех участников
+
+`worksheet-worker-sandbox-admin.service` работает под отдельным системным
+пользователем `worksheet-chat-admin` на порту `8445`. Full Codex toolset
+доступен task-запросам любого участника, но файловая запись ограничена уникальной
+job workspace. `/home/operator`, его токены, SSH и MCP не доступны.
+
+Перед первым запуском выполните официальный device login:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin login-sandbox-admin
+```
+
+После успешного smoke-test переключение и откат выполняются атомарно:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin activate-sandbox
+sudo -n /usr/local/sbin/worksheet-admin rollback-local
+```
+
 Не запускайте шлюз до проверки личности аккаунта. Сначала проверьте, что units
 загрузились и обработчик стартует:
 

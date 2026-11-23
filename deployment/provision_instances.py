@@ -157,6 +157,15 @@ def main() -> None:
         local_token = ""
     if len(local_token) < 32 or hmac.compare_digest(local_token, api_token):
         local_token = secrets.token_hex(32)
+    sandbox_gateway_path = ETC / "gateway-sandbox-admin.env"
+    if sandbox_gateway_path.exists():
+        sandbox_token = read_env(sandbox_gateway_path).get("WORKSHEET_CODEX_TRANSPORT_TOKEN", "")
+    else:
+        sandbox_token = ""
+    if len(sandbox_token) < 32 \
+            or hmac.compare_digest(sandbox_token, api_token) \
+            or hmac.compare_digest(sandbox_token, local_token):
+        sandbox_token = secrets.token_hex(32)
 
     common_gateway = {
         "WORKSHEET_MESSENGER_CLIENT_DIR": str(client_dir),
@@ -178,6 +187,13 @@ def main() -> None:
         "WORKSHEET_CODEX_WORKER_URL": "https://127.0.0.1:8444/v1/codex-worksheet-jobs",
         "WORKSHEET_CODEX_TRANSPORT_TOKEN": local_token,
     })
+    write_env(sandbox_gateway_path, {
+        **common_gateway,
+        "WORKSHEET_MESSENGER_CHAT_ID": resolved["local_user"],
+        "WORKSHEET_ALLOW_TASKS_FROM_ANY_PARTICIPANT": "true",
+        "WORKSHEET_CODEX_WORKER_URL": "https://127.0.0.1:8445/v1/codex-worksheet-jobs",
+        "WORKSHEET_CODEX_TRANSPORT_TOKEN": sandbox_token,
+    })
     local_model, local_effort = local_user_profile()
     write_env(ETC / "worker-local-user.env", {
         "WORKSHEET_CODEX_PROVIDER": "local_user",
@@ -190,6 +206,18 @@ def main() -> None:
         "WORKSHEET_CODEX_TLS_CERT": str(ETC / "local-user/server.crt"),
         "WORKSHEET_CODEX_TLS_KEY": str(ETC / "local-user/server.key"),
         "WORKSHEET_CODEX_TRANSPORT_TOKEN": local_token,
+    })
+    write_env(ETC / "worker-sandbox-admin.env", {
+        "WORKSHEET_CODEX_PROVIDER": "sandbox_admin",
+        "WORKSHEET_CODEX_BINARY": native_codex(),
+        "WORKSHEET_CODEX_MODEL": local_model,
+        "WORKSHEET_CODEX_REASONING_EFFORT": local_effort,
+        "WORKSHEET_ENABLE_IMAGE_GENERATION": "true",
+        "WORKSHEET_CODEX_LISTEN": "127.0.0.1",
+        "WORKSHEET_CODEX_PORT": "8445",
+        "WORKSHEET_CODEX_TLS_CERT": str(ETC / "sandbox-admin/server.crt"),
+        "WORKSHEET_CODEX_TLS_KEY": str(ETC / "sandbox-admin/server.key"),
+        "WORKSHEET_CODEX_TRANSPORT_TOKEN": sandbox_token,
     })
     for name, chat_id in resolved.items():
         print(f"resolved_instance={name} chat_id={chat_id}")

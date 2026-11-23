@@ -9,6 +9,7 @@ fi
 deployment_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 api_active=no
 local_active=no
+sandbox_active=no
 if systemctl is-active --quiet worksheet-worker.service; then
     api_active=yes
     systemctl stop worksheet-worker.service
@@ -16,6 +17,10 @@ fi
 if systemctl is-active --quiet worksheet-worker-local-user.service; then
     local_active=yes
     systemctl stop worksheet-worker-local-user.service
+fi
+if systemctl is-active --quiet worksheet-worker-sandbox-admin.service; then
+    sandbox_active=yes
+    systemctl stop worksheet-worker-sandbox-admin.service
 fi
 
 "${deployment_dir}/generate_tls.sh"
@@ -50,6 +55,9 @@ fi
 if [[ ${local_active} == yes ]]; then
     restart_and_check worksheet-worker-local-user.service 8444
 fi
-if [[ ${api_active} == no && ${local_active} == no ]]; then
-    echo "Both workers were inactive and remain inactive."
+if [[ ${sandbox_active} == yes ]]; then
+    restart_and_check worksheet-worker-sandbox-admin.service 8445
+fi
+if [[ ${api_active} == no && ${local_active} == no && ${sandbox_active} == no ]]; then
+    echo "All workers were inactive and remain inactive."
 fi

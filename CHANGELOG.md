@@ -33,6 +33,7 @@
 - исправлена загрузка instance-specific chat/email в Messenger identity-check;
 - статусные сообщения и модельная самореференция переведены в безличный стиль;
 - local-user instance разрешает task/image-generation любому участнику по явной настройке;
+- добавлен отдельный sandbox-admin instance для task-запросов всех участников без доступа к `operator` home;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;
 - task prompt запрещает объявлять изображение готовым без реального файла в `out/`;

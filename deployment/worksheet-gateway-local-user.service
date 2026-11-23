@@ -2,6 +2,7 @@
 Description=Messenger Worksheets Gateway (local-user instance)
 After=network-online.target worksheet-worker-local-user.service
 Wants=network-online.target worksheet-worker-local-user.service
+Conflicts=worksheet-gateway-sandbox-admin.service
 
 [Service]
 Type=simple

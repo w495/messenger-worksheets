@@ -85,17 +85,21 @@ class Request:
 
 def command(binary: Path, workspace: Path, request: Request, images: tuple[Path, ...]) -> list[str]:
     provider = os.environ.get("WORKSHEET_CODEX_PROVIDER", "endpoint")
+    model = os.environ.get("WORKSHEET_CODEX_MODEL")
+    model_identity = ""
+    if model and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", model):
+        model_identity = f" Текущая модель: {model}. На прямой вопрос назови эту модель."
     argv = [
         str(binary), "exec", "--ignore-user-config", "--json", "--skip-git-repo-check",
         "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
         "-c", "project_doc_max_bytes=0", "-c", 'shell_environment_policy.inherit="none"',
         "-c", 'developer_instructions=' + json.dumps(
-            INSTRUCTIONS + (TASK_INSTRUCTIONS if request.task else ""), ensure_ascii=False,
+            INSTRUCTIONS + model_identity + (TASK_INSTRUCTIONS if request.task else ""), ensure_ascii=False,
         ),
     ]
     if provider == "openai":
         argv.extend(("-c", 'model_provider="openai"'))
-        if model := os.environ.get("WORKSHEET_CODEX_MODEL"):
+        if model:
             argv.extend(("--model", model))
     elif provider == "direct_openai":
         argv.extend((
@@ -108,7 +112,7 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
             "-c", "model_context_window=16384",
             "-c", "model_auto_compact_token_limit=12000",
         ))
-        if model := os.environ.get("WORKSHEET_CODEX_MODEL"):
+        if model:
             argv.extend(("--model", model))
     elif provider == "endpoint":
         base = os.environ["WORKSHEET_CODEX_BASE_URL"].rstrip("/")
@@ -124,8 +128,8 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
             "-c", 'model_providers.worksheet_api.wire_api="responses"',
             "-c", 'model_providers.worksheet_api.env_key=' + json.dumps(MODEL_KEY),
         ))
-    elif provider == "local_user":
-        if model := os.environ.get("WORKSHEET_CODEX_MODEL"):
+    elif provider in {"local_user", "sandbox_admin"}:
+        if model:
             argv.extend(("--model", model))
     else:
         raise ValueError("unsupported worksheet Codex provider")
@@ -133,7 +137,10 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
         if effort not in REASONING_EFFORTS:
             raise ValueError("unsupported Codex reasoning effort")
         argv.extend(("-c", "model_reasoning_effort=" + json.dumps(effort)))
-    if request.task:
+    full_admin_task = provider == "sandbox_admin" and request.task
+    if full_admin_task:
+        argv.extend(("--ephemeral", "--sandbox", "workspace-write"))
+    elif request.task:
         allowed = {":minimal": "read", str(binary.resolve().parent): "read", str(workspace): "write"}
         paths = ",".join(f"{json.dumps(path)}={json.dumps(mode)}" for path, mode in allowed.items())
         argv.extend(("--ephemeral", "-c", 'default_permissions="messenger_task"',
@@ -144,9 +151,10 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
     task_features = {"shell_tool", "unified_exec", "view_image"}
     if os.environ.get("WORKSHEET_ENABLE_IMAGE_GENERATION") == "true":
         task_features.add("image_generation")
-    for feature in DISABLED_FEATURES:
-        if not request.task or feature not in task_features:
-            argv.extend(("--disable", feature))
+    if not full_admin_task:
+        for feature in DISABLED_FEATURES:
+            if not request.task or feature not in task_features:
+                argv.extend(("--disable", feature))
     if provider == "local_user":
         for feature in LOCAL_USER_DISABLED_FEATURES:
             argv.extend(("--disable", feature))
@@ -231,7 +239,7 @@ def execute(request: Request, state_dir: Path) -> dict:
                 env["OPENAI_API_KEY"] = key
         elif provider == "endpoint":
             env[MODEL_KEY] = os.environ[MODEL_KEY]
-        elif provider != "local_user":
+        elif provider not in {"local_user", "sandbox_admin"}:
             raise ValueError("unsupported worksheet Codex provider")
         def invoke(active: Request) -> subprocess.CompletedProcess[str]:
             return subprocess.run(

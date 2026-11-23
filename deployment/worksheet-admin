@@ -15,7 +15,9 @@ admin=/opt/messenger-worksheets/admin
 case $1 in
     status)
         systemctl show worksheet-worker.service worksheet-worker-local-user.service \
+            worksheet-worker-sandbox-admin.service \
             worksheet-gateway-api.service worksheet-gateway-local-user.service \
+            worksheet-gateway-sandbox-admin.service \
             worksheet-gateway.service \
             -p Id -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager
         ;;
@@ -38,6 +40,13 @@ case $1 in
     login-codex)
         exec "${python}" "${admin}/login_codex.py"
         ;;
+    login-sandbox-admin)
+        account_home=/var/lib/messenger-worksheets-chat-admin
+        exec /usr/bin/setpriv --reuid=worksheet-chat-admin --regid=worksheet-chat-admin \
+            --clear-groups -- /usr/bin/env HOME="${account_home}" \
+            PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
+            /usr/local/bin/codex login --device-auth
+        ;;
     smoke-api)
         export PYTHONPATH=/opt/messenger-worksheets/app
         exec "${python}" "${admin}/smoke_test_worker.py" \
@@ -47,6 +56,11 @@ case $1 in
         export PYTHONPATH=/opt/messenger-worksheets/app
         exec "${python}" "${admin}/smoke_test_worker.py" \
             --environment-file /etc/messenger-worksheets/gateway-local-user.env
+        ;;
+    smoke-sandbox)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/smoke_test_worker.py" \
+            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env
         ;;
     set-native-codex)
         shopt -s nullglob
@@ -108,6 +122,15 @@ case $1 in
     stop-worker-local)
         systemctl stop worksheet-worker-local-user.service
         ;;
+    start-worker-sandbox)
+        systemctl start worksheet-worker-sandbox-admin.service
+        ;;
+    restart-worker-sandbox)
+        systemctl restart worksheet-worker-sandbox-admin.service
+        ;;
+    stop-worker-sandbox)
+        systemctl stop worksheet-worker-sandbox-admin.service
+        ;;
     start-gateway-api)
         systemctl start worksheet-gateway-api.service
         ;;
@@ -119,6 +142,20 @@ case $1 in
         ;;
     stop-gateway-local)
         systemctl stop worksheet-gateway-local-user.service
+        ;;
+    start-gateway-sandbox)
+        systemctl start worksheet-gateway-sandbox-admin.service
+        ;;
+    stop-gateway-sandbox)
+        systemctl stop worksheet-gateway-sandbox-admin.service
+        ;;
+    activate-sandbox)
+        systemctl stop worksheet-gateway-local-user.service
+        systemctl start worksheet-worker-sandbox-admin.service worksheet-gateway-sandbox-admin.service
+        ;;
+    rollback-local)
+        systemctl stop worksheet-gateway-sandbox-admin.service
+        systemctl start worksheet-worker-local-user.service worksheet-gateway-local-user.service
         ;;
     start-api-instance)
         systemctl start worksheet-worker.service worksheet-gateway-api.service
@@ -136,17 +173,31 @@ case $1 in
         systemctl enable worksheet-worker.service worksheet-worker-local-user.service \
             worksheet-gateway-api.service worksheet-gateway-local-user.service
         ;;
+    enable-sandbox-instance)
+        systemctl disable worksheet-gateway-local-user.service worksheet-worker-local-user.service
+        systemctl enable worksheet-worker-sandbox-admin.service worksheet-gateway-sandbox-admin.service
+        ;;
+    enable-local-instance)
+        systemctl disable worksheet-gateway-sandbox-admin.service worksheet-worker-sandbox-admin.service
+        systemctl enable worksheet-worker-local-user.service worksheet-gateway-local-user.service
+        ;;
     logs-worker-api)
         journalctl -u worksheet-worker.service -n 100 --no-pager
         ;;
     logs-worker-local)
         journalctl -u worksheet-worker-local-user.service -n 100 --no-pager
         ;;
+    logs-worker-sandbox)
+        journalctl -u worksheet-worker-sandbox-admin.service -n 100 --no-pager
+        ;;
     logs-gateway-api)
         journalctl -u worksheet-gateway-api.service -n 100 --no-pager
         ;;
     logs-gateway-local)
         journalctl -u worksheet-gateway-local-user.service -n 100 --no-pager
+        ;;
+    logs-gateway-sandbox)
+        journalctl -u worksheet-gateway-sandbox-admin.service -n 100 --no-pager
         ;;
     revoke)
         rm -f -- /etc/sudoers.d/messenger-worksheets-admin

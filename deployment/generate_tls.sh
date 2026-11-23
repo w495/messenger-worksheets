@@ -56,5 +56,11 @@ if getent group operator >/dev/null && [[ -d ${destination}/local-user ]]; then
     install -m 0640 -o root -g operator "${certificate_work}/server.key" \
         "${destination}/local-user/server.key"
 fi
+if getent group worksheet-chat-admin >/dev/null && [[ -d ${destination}/sandbox-admin ]]; then
+    install -m 0644 -o root -g worksheet-chat-admin "${certificate_work}/server.crt" \
+        "${destination}/sandbox-admin/server.crt"
+    install -m 0640 -o root -g worksheet-chat-admin "${certificate_work}/server.key" \
+        "${destination}/sandbox-admin/server.key"
+fi
 
 echo "TLS certificate chain generated and verified."
