@@ -175,6 +175,7 @@ def main() -> None:
         "WORKSHEET_MESSENGER_CLIENT_DIR": str(client_dir),
         "WORKSHEET_MESSENGER_TOKEN": messenger_token,
         "WORKSHEET_MESSENGER_EMAIL": expected_email,
+        "WORKSHEET_REPLY_IN_THREADS": "true",
         "WORKSHEET_CODEX_WORKER_CA": str(ETC / "ca.crt"),
     }
     write_env(ETC / "gateway-api.env", {

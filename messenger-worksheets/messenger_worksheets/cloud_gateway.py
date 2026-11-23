@@ -66,8 +66,13 @@ class CloudBridge(Bridge):
         result = self.transfer(parent, stamp, message, task=False, session=session)
         return result["text"], result["session"]
 
-    def _task(self, parent: int, stamp: int, message: dict) -> tuple[str, tuple[Path, ...]]:
-        self.status(parent, stamp, "executing", "Задача запущена на облачной ВМ.")
+    def _task(
+        self, parent: int, stamp: int, message: dict, *, delivery_parent: int,
+    ) -> tuple[str, tuple[Path, ...]]:
+        self.status(
+            parent, stamp, "executing", "Задача запущена на облачной ВМ.",
+            delivery_parent=delivery_parent,
+        )
         task_url = os.environ.get("WORKSHEET_TASK_WORKER_URL")
         task_token = os.environ.get("WORKSHEET_TASK_WORKER_TRANSPORT_TOKEN")
         if bool(task_url) != bool(task_token):

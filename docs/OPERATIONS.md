@@ -103,6 +103,8 @@ API instance использует text-only direct Responses adapter (`store=fal
 локальная bounded history, без Codex tools и файловых задач).
 Task-запросы API-чата маршрутизируются в отдельный sandbox-admin worker, поэтому
 команды и файлы доступны без передачи API key этому worker.
+Статусы, ответы и artifacts обоих gateway отправляются в тред исходного
+сообщения; запросы внутри существующего треда остаются в нём.
 В local-user instance task-режим и image generation разрешены любому участнику
 чата; это даёт всем участникам возможность расходовать модельную квоту.
 

@@ -406,10 +406,17 @@ class Bridge:
             (payload, payload),
         ).fetchone())
 
-    def status(self, parent: int, stamp: int, stage: str, text: str) -> None:
+    def _delivery_parent(self, parent: int, stamp: int) -> int:
+        if parent == 0 and os.environ.get("WORKSHEET_REPLY_IN_THREADS") == "true":
+            return stamp
+        return parent
+
+    def status(
+        self, parent: int, stamp: int, stage: str, text: str, *, delivery_parent: int | None = None,
+    ) -> None:
         payload = self._update_payload(parent, stamp, stage)
         if payload is not None:
-            self.messenger.send(parent, text, payload)
+            self.messenger.send(parent if delivery_parent is None else delivery_parent, text, payload)
             self._mark_update_sent(payload)
 
     def _update_payload(self, parent: int, stamp: int, stage: str) -> str | None:
@@ -431,17 +438,21 @@ class Bridge:
     def _respond(
         self, parent: int, stamp: int, prompt: str, message: dict, session: str | None,
     ) -> str:
+        delivery_parent = self._delivery_parent(parent, stamp)
         record = self.db.execute(
             "SELECT payload, draft FROM replies WHERE parent = ? AND incoming = ?",
             (parent, stamp),
         ).fetchone()
         if record is None:
-            self.status(parent, stamp, "accepted", "Сообщение принято в обработку.")
+            self.status(
+                parent, stamp, "accepted", "Сообщение принято в обработку.",
+                delivery_parent=delivery_parent,
+            )
             print(f"message_accepted timestamp_us={stamp}", flush=True)
             files = ()
             if self._is_owner_task(message):
                 try:
-                    draft, files = self._task(parent, stamp, message)
+                    draft, files = self._task(parent, stamp, message, delivery_parent=delivery_parent)
                 except (CodexTurnError, subprocess.TimeoutExpired) as error:
                     reason = str(error) if isinstance(error, CodexTurnError) else "timed_out"
                     print(f"task_failed {reason}", flush=True)
@@ -459,12 +470,12 @@ class Bridge:
         else:
             payload, draft = record
         try:
-            self._send_artifacts(parent, stamp)
+            self._send_artifacts(parent, stamp, delivery_parent=delivery_parent)
         except Exception as error:
             print(f"artifact_delivery_retry {type(error).__name__}", flush=True)
             raise
         try:
-            self.messenger.send(parent, draft, payload)
+            self.messenger.send(delivery_parent, draft, payload)
         except Exception as error:
             print(f"reply_delivery_retry {type(error).__name__}", flush=True)
             raise
@@ -484,8 +495,13 @@ class Bridge:
             and bool(TASK_REQUEST.search(message.get("text") or ""))
         )
 
-    def _task(self, parent: int, stamp: int, message: dict) -> tuple[str, tuple[Path, ...]]:
-        self.status(parent, stamp, "executing", "Задача запущена в Codex.")
+    def _task(
+        self, parent: int, stamp: int, message: dict, *, delivery_parent: int,
+    ) -> tuple[str, tuple[Path, ...]]:
+        self.status(
+            parent, stamp, "executing", "Задача запущена в Codex.",
+            delivery_parent=delivery_parent,
+        )
         with TemporaryDirectory(prefix="messenger-task-") as directory:
             job = Path(directory).resolve()
             input_dir = job / "input"
@@ -496,7 +512,10 @@ class Bridge:
             prompt = message_prompt(message, parent, len(images))
             reply, _ = codex_answer(
                 job, prompt, None, images,
-                progress=lambda: self.status(parent, stamp, "working", "Codex ещё выполняет задачу."),
+                progress=lambda: self.status(
+                    parent, stamp, "working", "Codex ещё выполняет задачу.",
+                    delivery_parent=delivery_parent,
+                ),
             )
             return reply, self._preserve_files(output_dir)
 
@@ -535,14 +554,16 @@ class Bridge:
             os.close(directory)
         return tuple(files)
 
-    def _send_artifacts(self, parent: int, stamp: int) -> None:
+    def _send_artifacts(self, parent: int, stamp: int, *, delivery_parent: int) -> None:
         artifacts = self.db.execute(
             "SELECT path FROM artifacts WHERE parent=? AND incoming=? ORDER BY path", (parent, stamp),
         ).fetchall()
         for number, (path,) in enumerate(artifacts, 1):
             payload = self._update_payload(parent, stamp, f"artifact_{number}")
             if payload is not None:
-                self.messenger.send_file(parent, Path(path), payload, self.workspace.parent / "file-receipts")
+                self.messenger.send_file(
+                    delivery_parent, Path(path), payload, self.workspace.parent / "file-receipts",
+                )
                 self._mark_update_sent(payload)
 
     def _draft(
