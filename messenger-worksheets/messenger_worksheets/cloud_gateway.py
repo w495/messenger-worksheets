@@ -10,9 +10,12 @@ from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 import time
+from urllib.error import HTTPError, URLError
 import uuid
 
-from messenger_codex.bridge import Bridge, POLL_SECONDS, PROGRESS_SECONDS, message_prompt
+from messenger_codex.bridge import (
+    Bridge, CodexTurnError, POLL_SECONDS, PROGRESS_SECONDS, message_prompt,
+)
 from .codex_rpc import submit
 from .codex_worker import MAX_RESULT_BYTES
 from .personal_messenger import CHAT, PersonalMessenger
@@ -97,6 +100,10 @@ class CloudBridge(Bridge):
                         self.progress(parent, stamp, delivery_parent, "Задача выполняется …")
                     except Exception as error:
                         print(f"progress_update_failed {type(error).__name__}", flush=True)
+                except HTTPError as error:
+                    raise CodexTurnError(f"worker_http_{error.code}") from None
+                except URLError:
+                    raise CodexTurnError("worker_connection_failed") from None
         with TemporaryDirectory(prefix="cloud-gateway-results-") as directory:
             output = Path(directory)
             remaining = MAX_RESULT_BYTES

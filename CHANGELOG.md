@@ -52,6 +52,7 @@
 - progress start логирует только безопасный delivery failure code и response key shape;
 - `send_outcome_unknown` подтверждается через history по payload/author вместо retry-loop;
 - inclusive history cursor/MaxTimestamp boundaries пропускаются как дубли вместо retry-loop;
+- worker HTTP/connection failures завершают task один раз и продвигают thread cursor;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;
 - старый API-chat переведён на text-only direct Responses adapter с локальными UUID-сессиями;
