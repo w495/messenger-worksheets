@@ -256,9 +256,10 @@ class Messenger:
             reply, **fields, confirm_fingerprint=preview["fingerprint"],
         )
         outcome = result.get("outcome")
-        if outcome not in {"confirmed", "duplicate"}:
+        if outcome == "rejected":
             raise RuntimeError(f"send_outcome_{outcome}")
-        if result.get("chat_id") != self.feed(parent):
+        reported_chat = result.get("chat_id")
+        if reported_chat not in {None, self.feed(parent)}:
             raise RuntimeError("send_chat_mismatch")
         info = result.get("message_info") or {}
         timestamp = info.get("Timestamp") or info.get("timestamp")
@@ -285,7 +286,8 @@ class Messenger:
             result_keys = ",".join(sorted(str(key) for key in result))
             info_keys = ",".join(sorted(str(key) for key in info)) if isinstance(info, dict) else "not_dict"
             raise RuntimeError(
-                f"send_timestamp_missing result_keys={result_keys} info_keys={info_keys}"
+                f"send_timestamp_missing outcome={outcome} "
+                f"result_keys={result_keys} info_keys={info_keys}"
             )
         return timestamp
 

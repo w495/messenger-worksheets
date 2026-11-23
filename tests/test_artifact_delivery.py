@@ -69,6 +69,13 @@ class NestedTimestampClient(MissingTimestampClient):
         raise AssertionError("history fallback must not run")
 
 
+class UnknownOutcomeClient(MissingTimestampClient):
+    def send_message(self, text, **kwargs):
+        if "confirm_fingerprint" not in kwargs:
+            return {"fingerprint": "message-fingerprint"}
+        return {"outcome": "unknown", "chat_id": kwargs["chat_id"], "message_info": None}
+
+
 class ArtifactDeliveryTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -124,6 +131,15 @@ class ArtifactDeliveryTest(unittest.TestCase):
             "00000000-0000-0000-0000-000000000005",
         )
         self.assertEqual(timestamp, 123456)
+
+    def test_unknown_outcome_is_reconciled_by_history(self):
+        self.messenger.client = UnknownOutcomeClient()
+        timestamp = self.messenger.send(
+            0,
+            "status",
+            "00000000-0000-0000-0000-000000000004",
+        )
+        self.assertEqual(timestamp, 987654)
 
 
 if __name__ == "__main__":
