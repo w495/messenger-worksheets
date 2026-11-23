@@ -33,6 +33,9 @@ class RejectingImageClient(FakeClient):
 class MissingTimestampClient:
     guid = "00000000-0000-0000-0000-000000000099"
 
+    def __init__(self):
+        self.history_calls = 0
+
     def send_message(self, text, **kwargs):
         if "confirm_fingerprint" not in kwargs:
             return {"fingerprint": "message-fingerprint"}
@@ -42,6 +45,9 @@ class MissingTimestampClient:
         return {"guid": self.guid}
 
     def read_history(self, chat_id, limit):
+        self.history_calls += 1
+        if self.history_calls < 3:
+            return {"messages": []}
         return {"messages": [{
             "payload_id": "00000000-0000-0000-0000-000000000004",
             "author_guid": self.guid,
@@ -94,6 +100,7 @@ class ArtifactDeliveryTest(unittest.TestCase):
             "00000000-0000-0000-0000-000000000004",
         )
         self.assertEqual(timestamp, 987654)
+        self.assertEqual(self.messenger.client.history_calls, 3)
 
 
 if __name__ == "__main__":

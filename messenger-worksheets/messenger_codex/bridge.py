@@ -262,16 +262,20 @@ class Messenger:
         info = result.get("message_info") or {}
         timestamp = info.get("Timestamp") or info.get("timestamp")
         if type(timestamp) is not int or timestamp <= 0:
-            history = self.client.read_history(chat_id=self.feed(parent), limit=50)
             identity = self.client.identity()["guid"]
-            matching = [
-                message
-                for message in history.get("messages", [])
-                if message.get("payload_id") == payload_id
-                and message.get("author_guid") == identity
-                and type(message.get("ts")) is int
-            ]
-            timestamp = max((message["ts"] for message in matching), default=None)
+            for attempt in range(5):
+                history = self.client.read_history(chat_id=self.feed(parent), limit=50)
+                matching = [
+                    message
+                    for message in history.get("messages", [])
+                    if message.get("payload_id") == payload_id
+                    and message.get("author_guid") == identity
+                    and type(message.get("ts")) is int
+                ]
+                timestamp = max((message["ts"] for message in matching), default=None)
+                if type(timestamp) is int and timestamp > 0:
+                    break
+                time.sleep(0.25 * (attempt + 1))
         if type(timestamp) is not int or timestamp <= 0:
             raise RuntimeError("Messenger did not return the delivered message timestamp")
         return timestamp

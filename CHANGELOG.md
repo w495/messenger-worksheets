@@ -45,6 +45,7 @@
 - spinner случайно выбирается из восьми стилей и сохраняется для task в SQLite;
 - анимированные spinner-кадры выводятся без квадратных скобок;
 - progress timestamp при отсутствии в push-response сверяется по payload_id через history;
+- progress timestamp reconciliation учитывает eventual consistency с bounded backoff;
 - inclusive history cursor/MaxTimestamp boundaries пропускаются как дубли вместо retry-loop;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;
