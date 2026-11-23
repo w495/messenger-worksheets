@@ -68,6 +68,23 @@ sudo bash deployment/install_admin_helper.sh
 sudo -n /usr/local/sbin/worksheet-admin revoke
 ```
 
+### Local-user mode
+
+Отдельный opt-in worker `worksheet-worker-local-user.service` запускает Codex
+от имени `operator` и использует `/home/operator/.codex/config.toml` и официальную
+авторизацию этого пользователя. API key в этот процесс не передаётся.
+
+Режим менее изолирован: worker получает права `operator` и доступ к его home.
+Gateway по-прежнему работает под отдельным `worksheet-gateway`. Одновременно
+работает только один worker на `127.0.0.1:8443`.
+
+Переключение выполняется временным admin-helper:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin switch-to-local-user
+sudo -n /usr/local/sbin/worksheet-admin switch-to-api-key
+```
+
 Не запускайте шлюз до проверки личности аккаунта. Сначала проверьте, что units
 загрузились и обработчик стартует:
 

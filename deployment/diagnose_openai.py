@@ -18,7 +18,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 ENV_FILE = Path("/etc/messenger-worksheets/worker.env")
 STATE_DIR = Path("/var/lib/messenger-worksheets-worker")
 REQUIRED = {"WORKSHEET_CODEX_API_KEY", "WORKSHEET_CODEX_BINARY"}
-TARGET_MODEL = "gpt-6.2-sol"
+TARGET_MODEL = "gpt-5.3-codex"
 TARGET_REASONING_EFFORT = "high"
 DISABLED = (
     "shell_tool", "unified_exec", "hooks", "plugins", "multi_agent",

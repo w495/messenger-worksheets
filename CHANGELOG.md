@@ -16,8 +16,10 @@
 - вывод диагностического Codex направлен в `/dev/null`, жёсткий лимит снижен до 45 секунд;
 - диагностический stderr собирается через временный fd и выводится только как безопасная категория;
 - диагностика различает Responses API quota/rate-limit по безопасным `error.type` и `error.code`;
-- профиль API-key deployment синхронизирован с Codex config: `gpt-6.2-sol`, reasoning `high`;
+- основной API-key профиль закреплён на проверенной `gpt-5.3-codex`, reasoning `high`;
 - диагностика выводит безопасный список текстовых GPT model ID и проверяет target даже вне `/v1/models`;
 - добавлен официальный `codex login --with-api-key` под изолированным worker через stdin;
 - добавлен временный root-owned `worksheet-admin` с фиксированными операциями и self-revoke;
+- добавлен opt-in local-user worker для Codex-конфига и auth пользователя `operator`;
+- добавлена read-only проверка точной Messenger identity перед запуском gateway;
 - добавлены документация и локальная проверка репозитория.

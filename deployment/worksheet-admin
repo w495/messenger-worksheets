@@ -14,11 +14,16 @@ admin=/opt/messenger-worksheets/admin
 
 case $1 in
     status)
-        systemctl show worksheet-worker.service worksheet-gateway.service \
+        systemctl show worksheet-worker.service worksheet-worker-local-user.service \
+            worksheet-gateway.service \
             -p Id -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager
         ;;
     diagnose-openai)
         exec "${python}" "${admin}/diagnose_openai.py"
+        ;;
+    check-messenger)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/check_messenger.py"
         ;;
     login-codex)
         exec "${python}" "${admin}/login_codex.py"
@@ -49,17 +54,17 @@ case $1 in
         trap - EXIT
         echo "Worker configured to use the native Codex binary."
         ;;
-    set-profile-gpt-6.2-sol-high)
+    set-profile-gpt-5.3-codex-high)
         environment=/etc/messenger-worksheets/worker.env
         temporary=$(mktemp /etc/messenger-worksheets/worker.env.XXXXXX)
         trap 'rm -f -- "${temporary}"' EXIT
         awk '
             BEGIN { model = 0; effort = 0 }
-            /^WORKSHEET_CODEX_MODEL=/ { print "WORKSHEET_CODEX_MODEL=gpt-6.2-sol"; model = 1; next }
+            /^WORKSHEET_CODEX_MODEL=/ { print "WORKSHEET_CODEX_MODEL=gpt-5.3-codex"; model = 1; next }
             /^WORKSHEET_CODEX_REASONING_EFFORT=/ { print "WORKSHEET_CODEX_REASONING_EFFORT=high"; effort = 1; next }
             { print }
             END {
-                if (!model) print "WORKSHEET_CODEX_MODEL=gpt-6.2-sol"
+                if (!model) print "WORKSHEET_CODEX_MODEL=gpt-5.3-codex"
                 if (!effort) print "WORKSHEET_CODEX_REASONING_EFFORT=high"
             }
         ' "${environment}" > "${temporary}"
@@ -67,7 +72,7 @@ case $1 in
         chown root:root "${temporary}"
         mv -f -- "${temporary}" "${environment}"
         trap - EXIT
-        echo "Worker profile configured as gpt-6.2-sol with reasoning high."
+        echo "Worker profile configured as gpt-5.3-codex with reasoning high."
         ;;
     start-worker)
         systemctl start worksheet-worker.service
@@ -78,6 +83,17 @@ case $1 in
     stop-worker)
         systemctl stop worksheet-worker.service
         ;;
+    switch-to-local-user)
+        systemctl stop worksheet-worker.service
+        systemctl start worksheet-worker-local-user.service
+        ;;
+    stop-worker-local)
+        systemctl stop worksheet-worker-local-user.service
+        ;;
+    switch-to-api-key)
+        systemctl stop worksheet-worker-local-user.service
+        systemctl start worksheet-worker.service
+        ;;
     start-gateway)
         systemctl start worksheet-gateway.service
         ;;
@@ -86,6 +102,9 @@ case $1 in
         ;;
     logs-worker)
         journalctl -u worksheet-worker.service -n 100 --no-pager
+        ;;
+    logs-worker-local)
+        journalctl -u worksheet-worker-local-user.service -n 100 --no-pager
         ;;
     logs-gateway)
         journalctl -u worksheet-gateway.service -n 100 --no-pager

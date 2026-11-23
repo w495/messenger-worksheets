@@ -23,6 +23,7 @@ MAX_RESULT_BYTES = 50 * 1024 * 1024
 IMAGE_TYPES = {"jpeg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp"}
 MODEL_KEY = "WORKSHEET_CODEX_API_KEY"
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+LOCAL_USER_DISABLED_FEATURES = ("apps", "browser_use", "computer_use", "remote_plugin")
 
 
 @dataclass(frozen=True)
@@ -62,15 +63,18 @@ class Request:
 
 
 def command(binary: Path, workspace: Path, request: Request, images: tuple[Path, ...]) -> list[str]:
-    argv = [
-        str(binary), "exec", "--ignore-user-config", "--json", "--skip-git-repo-check",
+    provider = os.environ.get("WORKSHEET_CODEX_PROVIDER", "endpoint")
+    argv = [str(binary), "exec"]
+    if provider != "local_user":
+        argv.append("--ignore-user-config")
+    argv.extend([
+        "--json", "--skip-git-repo-check",
         "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
         "-c", "project_doc_max_bytes=0", "-c", 'shell_environment_policy.inherit="none"',
         "-c", 'developer_instructions=' + json.dumps(
             INSTRUCTIONS + (TASK_INSTRUCTIONS if request.task else ""), ensure_ascii=False,
         ),
-    ]
-    provider = os.environ.get("WORKSHEET_CODEX_PROVIDER", "endpoint")
+    ])
     if provider == "openai":
         argv.extend(("-c", 'model_provider="openai"'))
         if model := os.environ.get("WORKSHEET_CODEX_MODEL"):
@@ -89,6 +93,10 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
             "-c", 'model_providers.worksheet_api.wire_api="responses"',
             "-c", 'model_providers.worksheet_api.env_key=' + json.dumps(MODEL_KEY),
         ))
+    elif provider == "local_user":
+        argv.extend(("-c", "mcp_servers={}"))
+        if model := os.environ.get("WORKSHEET_CODEX_MODEL"):
+            argv.extend(("--model", model))
     else:
         raise ValueError("unsupported worksheet Codex provider")
     if effort := os.environ.get("WORKSHEET_CODEX_REASONING_EFFORT"):
@@ -105,6 +113,9 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
         argv.extend(("--sandbox", "read-only"))
     for feature in DISABLED_FEATURES:
         if not request.task or feature not in {"shell_tool", "unified_exec", "view_image"}:
+            argv.extend(("--disable", feature))
+    if provider == "local_user":
+        for feature in LOCAL_USER_DISABLED_FEATURES:
             argv.extend(("--disable", feature))
     if request.session:
         argv.extend(("resume", request.session))
@@ -181,11 +192,14 @@ def execute(request: Request, state_dir: Path) -> dict:
         output.mkdir()
         env = {key: os.environ[key] for key in ("HOME", "PATH", "LANG", "SSL_CERT_FILE", "XDG_RUNTIME_DIR")
                if key in os.environ}
-        if os.environ.get("WORKSHEET_CODEX_PROVIDER", "endpoint") == "openai":
+        provider = os.environ.get("WORKSHEET_CODEX_PROVIDER", "endpoint")
+        if provider == "openai":
             if key := os.environ.get(MODEL_KEY):
                 env["OPENAI_API_KEY"] = key
-        else:
+        elif provider == "endpoint":
             env[MODEL_KEY] = os.environ[MODEL_KEY]
+        elif provider != "local_user":
+            raise ValueError("unsupported worksheet Codex provider")
         result = subprocess.run(command(binary, workspace, request, tuple(images)), cwd=workspace,
                                 env=env, input=request.text, text=True, capture_output=True,
                                 check=False, timeout=300 if request.task else 120)
