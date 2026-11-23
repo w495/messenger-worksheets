@@ -23,7 +23,7 @@ LOGIN = "operator"
 PAGE_SIZE = 100
 POLL_SECONDS = 10
 THREAD_DISCOVERY_SECONDS = 60
-PROGRESS_SECONDS = 2
+PROGRESS_SECONDS = 1
 SPINNER_VARIANTS = (
     ("-", "\\", "|", "/"),
     ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"),
