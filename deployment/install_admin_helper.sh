@@ -22,6 +22,7 @@ install -m 0755 -o root -g root "${deployment_dir}/worksheet-admin" \
 sudoers_tmp=$(mktemp)
 trap 'rm -f -- "${sudoers_tmp}"' EXIT
 for operation in status diagnose-openai login-codex smoke-worker set-native-codex \
+    set-model-gpt-5.6-sol \
     start-worker restart-worker stop-worker start-gateway stop-gateway \
     logs-worker logs-gateway revoke; do
     printf 'operator ALL=(root) NOPASSWD: /usr/local/sbin/worksheet-admin %s\n' "${operation}"

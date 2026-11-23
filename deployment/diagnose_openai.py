@@ -60,6 +60,8 @@ def api_probe(key: str) -> tuple[str, list[str]]:
 
 
 def select_responses_model(models: list[str]) -> str | None:
+    if "gpt-5.6-sol" in models:
+        return "gpt-5.6-sol"
     excluded = ("audio", "image", "realtime", "search", "transcribe", "tts")
     codex = sorted(
         model for model in models
@@ -140,7 +142,7 @@ def classify_diagnostic(stderr: str, stdout: str, returncode: int) -> str:
     return f"unknown_exit_{returncode}"
 
 
-def codex_probe(binary: str, key: str) -> str:
+def codex_probe(binary: str, key: str, model: str) -> str:
     account = pwd.getpwnam("worksheet-worker")
     command = [
         "/usr/bin/setpriv",
@@ -155,6 +157,7 @@ def codex_probe(binary: str, key: str) -> str:
         "-c", 'shell_environment_policy.inherit="none"',
         "-c", 'developer_instructions="Reply exactly CODEX_OK"',
         "-c", 'model_provider="openai"',
+        "--model", model,
         "--sandbox", "read-only",
     ]
     for feature in DISABLED:
@@ -212,7 +215,10 @@ def main() -> None:
         print(responses_probe(values["WORKSHEET_CODEX_API_KEY"], model))
     binary = resolve_native_codex(values["WORKSHEET_CODEX_BINARY"])
     print("codex_binary=native")
-    print(codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"]))
+    if model is None:
+        print("codex_cli=skipped_no_compatible_model")
+    else:
+        print(codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"], model))
 
 
 if __name__ == "__main__":

@@ -83,6 +83,7 @@ read_secret "OpenAI API key" openai_key
 transport_token=$(openssl rand -hex 32)
 {
     printf 'WORKSHEET_CODEX_PROVIDER=openai\n'
+    printf 'WORKSHEET_CODEX_MODEL=gpt-5.6-sol\n'
     printf 'WORKSHEET_CODEX_BINARY=/usr/local/bin/codex\n'
     printf 'WORKSHEET_CODEX_LISTEN=127.0.0.1\n'
     printf 'WORKSHEET_CODEX_PORT=8443\n'
