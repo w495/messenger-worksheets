@@ -504,6 +504,8 @@ class Bridge:
                 )
 
     def _is_our_reply(self, message: dict) -> bool:
+        if message.get("author_guid") == self.messenger.identity.get("guid"):
+            return True
         payload = message.get("payload_id")
         return bool(payload and self.db.execute(
             "SELECT 1 FROM replies WHERE payload = ? "

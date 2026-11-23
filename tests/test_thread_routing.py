@@ -11,6 +11,7 @@ from messenger_codex.bridge import Bridge, Messenger
 
 class FakeMessenger:
     chat = "0/0/00000000-0000-0000-0000-000000000000"
+    identity = {"guid": "00000000-0000-0000-0000-000000000099"}
 
     def __init__(self):
         self.sent = []
@@ -81,6 +82,16 @@ class ThreadRoutingTest(unittest.TestCase):
         self.assertTrue(messenger.edited[0][2].startswith("`\\`"))
         self.assertEqual(messenger.edited[1][2], "✅ Готово.")
         self.assertTrue(bridge._is_our_reply({"payload_id": messenger.sent[0][2]}))
+
+    def test_own_attachment_is_ignored_even_with_derived_payload(self):
+        database = sqlite3.connect(":memory:")
+        messenger = FakeMessenger()
+        bridge = Bridge(database, messenger, Path("/tmp"))
+        self.assertTrue(bridge._is_our_reply({
+            "author_guid": messenger.identity["guid"],
+            "payload_id": "00000000-0000-0000-0000-000000000098",
+            "media": [{"kind": "miscfile"}],
+        }))
 
     def test_history_skips_inclusive_cursor_boundaries(self):
         messenger = object.__new__(Messenger)
