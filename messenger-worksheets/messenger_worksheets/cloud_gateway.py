@@ -23,6 +23,7 @@ FORMATS = {".png": "png", ".jpg": "jpeg", ".gif": "gif", ".webp": "webp"}
 class CloudBridge(Bridge):
     def transfer(
         self, parent: int, stamp: int, message: dict, *, task: bool, session: str | None,
+        worker_url: str | None = None, transport_token: str | None = None,
     ) -> dict:
         with TemporaryDirectory(prefix="cloud-gateway-images-") as directory:
             paths = self.messenger.download_images(message.get("media", []), Path(directory))
@@ -38,7 +39,12 @@ class CloudBridge(Bridge):
                 "images": images,
             }
             identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{CHAT}/{parent}/{stamp}"))
-            result = submit(os.environ["WORKSHEET_CODEX_WORKER_URL"], identifier, job)
+            result = submit(
+                worker_url or os.environ["WORKSHEET_CODEX_WORKER_URL"],
+                identifier,
+                job,
+                transport_token=transport_token,
+            )
         if not isinstance(result, dict) or result.keys() != {"text", "session", "files"}:
             raise ValueError("invalid Codex response fields")
         if not isinstance(result["text"], str) or not result["text"].strip() or len(result["text"]) > 6000:
@@ -62,7 +68,19 @@ class CloudBridge(Bridge):
 
     def _task(self, parent: int, stamp: int, message: dict) -> tuple[str, tuple[Path, ...]]:
         self.status(parent, stamp, "executing", "Задача запущена на облачной ВМ.")
-        result = self.transfer(parent, stamp, message, task=True, session=None)
+        task_url = os.environ.get("WORKSHEET_TASK_WORKER_URL")
+        task_token = os.environ.get("WORKSHEET_TASK_WORKER_TRANSPORT_TOKEN")
+        if bool(task_url) != bool(task_token):
+            raise ValueError("task worker routing is incomplete")
+        result = self.transfer(
+            parent,
+            stamp,
+            message,
+            task=True,
+            session=None,
+            worker_url=task_url,
+            transport_token=task_token,
+        )
         with TemporaryDirectory(prefix="cloud-gateway-results-") as directory:
             output = Path(directory)
             remaining = MAX_RESULT_BYTES

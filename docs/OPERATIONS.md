@@ -101,6 +101,8 @@ API instance использует порт `8443` и `gateway-api.env`; local-us
 порт `8444` и `gateway-local-user.env`. StateDirectory и RPC token раздельные.
 API instance использует text-only direct Responses adapter (`store=false`,
 локальная bounded history, без Codex tools и файловых задач).
+Task-запросы API-чата маршрутизируются в отдельный sandbox-admin worker, поэтому
+команды и файлы доступны без передачи API key этому worker.
 В local-user instance task-режим и image generation разрешены любому участнику
 чата; это даёт всем участникам возможность расходовать модельную квоту.
 

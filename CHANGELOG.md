@@ -40,5 +40,6 @@
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;
 - старый API-chat переведён на text-only direct Responses adapter с локальными UUID-сессиями;
+- task-запросы API-чата маршрутизируются в sandbox-admin для команд и файлов;
 - task prompt запрещает объявлять изображение готовым без реального файла в `out/`;
 - добавлены документация и локальная проверка репозитория.

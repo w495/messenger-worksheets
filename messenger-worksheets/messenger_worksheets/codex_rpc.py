@@ -30,16 +30,24 @@ def check_size(data: bytes, maximum: int) -> bytes:
     return data
 
 
-def submit(endpoint: str, job_id: str, job: dict) -> dict:
+def submit(
+    endpoint: str,
+    job_id: str,
+    job: dict,
+    *,
+    transport_token: str | None = None,
+    ca_file: str | None = None,
+) -> dict:
     url = urlsplit(endpoint)
     if (url.scheme != "https" or not url.hostname or url.username is not None
             or url.password is not None or url.query or url.fragment or url.path != JOB_PATH):
         raise ValueError("invalid worksheet worker address")
     body = check_size(json.dumps({"job_id": job_id, "input": job}, ensure_ascii=False).encode(), MAX_INPUT_BYTES)
-    context = ssl.create_default_context(cafile=os.environ["WORKSHEET_CODEX_WORKER_CA"])
+    context = ssl.create_default_context(cafile=ca_file or os.environ["WORKSHEET_CODEX_WORKER_CA"])
     opener = build_opener(NoRedirect(), HTTPSHandler(context=context))
     request = HTTPRequest(endpoint, data=body, headers={
-        "Content-Type": "application/json", "Authorization": "Bearer " + os.environ[TRANSPORT_KEY],
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + (transport_token or os.environ[TRANSPORT_KEY]),
     })
     with opener.open(request, timeout=330) as result:
         return json.loads(check_size(result.read(MAX_OUTPUT_BYTES + 1), MAX_OUTPUT_BYTES))

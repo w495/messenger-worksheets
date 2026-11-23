@@ -81,7 +81,7 @@ sudoers_tmp=$(mktemp)
 trap 'rm -f -- "${sudoers_tmp}"' EXIT
 for operation in status check-messenger-api check-messenger-local \
     diagnose-openai doctor-openai login-codex smoke-api smoke-local set-native-codex \
-    login-sandbox-admin smoke-sandbox \
+    login-sandbox-admin smoke-sandbox smoke-sandbox-task \
     set-profile-gpt-5.3-codex-high \
     start-worker-api restart-worker-api stop-worker-api \
     start-worker-local restart-worker-local stop-worker-local \
