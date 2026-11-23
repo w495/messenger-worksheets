@@ -235,16 +235,17 @@ class Messenger:
                 server = raw.get("ServerMessage") or raw
                 info = server.get("ServerMessageInfo") or {}
                 stamp = info.get("Timestamp")
-                if (
-                    type(stamp) is not int or stamp <= after
-                    or stamp >= payload.get("MaxTimestamp", sys.maxsize)
-                ):
-                    raise RuntimeError("Messenger returned a message outside the requested range")
+                if type(stamp) is not int:
+                    raise RuntimeError("Messenger returned a message without integer timestamp")
+                if stamp <= after or stamp >= payload.get("MaxTimestamp", sys.maxsize):
+                    continue
                 message = self.render(raw)
                 message["thread_exists"] = bool(info.get("ThreadState"))
                 messages[stamp] = message
                 oldest = stamp if oldest is None else min(oldest, stamp)
             if len(page) < PAGE_SIZE:
+                break
+            if oldest is None:
                 break
             payload["MaxTimestamp"] = oldest
         return sorted(messages.items())

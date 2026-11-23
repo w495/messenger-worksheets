@@ -6,7 +6,7 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from messenger_codex.bridge import Bridge
+from messenger_codex.bridge import Bridge, Messenger
 
 
 class FakeMessenger:
@@ -22,6 +22,21 @@ class FakeMessenger:
 
     def edit(self, parent, timestamp, text):
         self.edited.append((parent, timestamp, text))
+
+
+class BoundaryHistoryClient:
+    def fanout(self, operation, payload):
+        chat = payload["ChatId"]
+        return {
+            "Chats": [{
+                "ChatId": chat,
+                "Messages": [
+                    {"ServerMessage": {"ServerMessageInfo": {"Timestamp": 99}}},
+                    {"ServerMessage": {"ServerMessageInfo": {"Timestamp": 100}}},
+                    {"ServerMessage": {"ServerMessageInfo": {"Timestamp": 101}}},
+                ],
+            }],
+        }
 
 
 class ThreadRoutingTest(unittest.TestCase):
@@ -55,6 +70,15 @@ class ThreadRoutingTest(unittest.TestCase):
         self.assertEqual(len(messenger.edited), 2)
         self.assertTrue(messenger.edited[0][2].startswith("`[\\]`"))
         self.assertEqual(messenger.edited[1][2], "`[+]` Готово.")
+
+    def test_history_skips_inclusive_cursor_boundaries(self):
+        messenger = object.__new__(Messenger)
+        messenger.chat = "0/0/00000000-0000-0000-0000-000000000000"
+        messenger.client = BoundaryHistoryClient()
+        messenger.thread_chat_id = lambda chat, parent: chat
+        messenger.render = lambda raw: {"text": "message"}
+        messages = messenger.new_messages(parent=0, after=100)
+        self.assertEqual([stamp for stamp, _ in messages], [101])
 
 
 if __name__ == "__main__":
