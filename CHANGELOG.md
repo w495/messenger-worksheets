@@ -44,6 +44,7 @@
 - task progress редактирует одно сообщение с BSD spinner и завершает его `[+] Готово.`;
 - spinner случайно выбирается из восьми стилей и сохраняется для task в SQLite;
 - анимированные spinner-кадры выводятся без квадратных скобок;
+- вариант spinner с движущимся квадратом удалён;
 - progress timestamp при отсутствии в push-response сверяется по payload_id через history;
 - progress timestamp reconciliation учитывает eventual consistency с bounded backoff;
 - inclusive history cursor/MaxTimestamp boundaries пропускаются как дубли вместо retry-loop;
