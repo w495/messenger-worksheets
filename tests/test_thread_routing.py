@@ -6,7 +6,7 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from messenger_codex.bridge import Bridge, CodexTurnError, Messenger
+from messenger_codex.bridge import Bridge, CodexTurnError, Messenger, PROGRESS_SECONDS
 
 
 class FakeMessenger:
@@ -71,6 +71,9 @@ class ThreadRoutingTest(unittest.TestCase):
 
     def test_disabled_thread_routing_keeps_main_chat(self):
         self.assertEqual(self.bridge._delivery_parent(0, 123456), 0)
+
+    def test_spinner_updates_every_100_milliseconds(self):
+        self.assertEqual(PROGRESS_SECONDS, 0.1)
 
     def test_progress_edits_one_message_and_finishes(self):
         database = sqlite3.connect(":memory:")
