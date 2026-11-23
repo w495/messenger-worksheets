@@ -24,6 +24,12 @@ class FakeClient:
         return {"outcome": "confirmed"}
 
 
+class RejectingImageClient(FakeClient):
+    def send_image_with_caption(self, **kwargs):
+        self.operations.append(("image", kwargs))
+        raise ValueError("invalid test PNG")
+
+
 class ArtifactDeliveryTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -47,6 +53,16 @@ class ArtifactDeliveryTest(unittest.TestCase):
         document.write_text("ok", encoding="utf-8")
         self.messenger.send_file(0, document, "00000000-0000-0000-0000-000000000002", self.root)
         self.assertEqual([kind for kind, _ in self.messenger.client.operations], ["document", "document"])
+
+    def test_invalid_png_falls_back_to_document(self):
+        image = self.root / "broken.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\nnot-a-real-png")
+        self.messenger.client = RejectingImageClient()
+        self.messenger.send_file(0, image, "00000000-0000-0000-0000-000000000003", self.root)
+        self.assertEqual(
+            [kind for kind, _ in self.messenger.client.operations],
+            ["image", "document", "document"],
+        )
 
 
 if __name__ == "__main__":

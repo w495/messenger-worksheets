@@ -38,6 +38,7 @@
 - sandbox-admin task-mode включает явно разрешённый внешний network access;
 - sandbox-admin task-mode использует явно разрешённый `danger-full-access` внутри systemd isolation;
 - PNG artifacts отправляются как нативные Messenger images, остальные — как documents;
+- invalid PNG preview безопасно откатывается к document и не блокирует очередь gateway;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;
 - старый API-chat переведён на text-only direct Responses adapter с локальными UUID-сессиями;

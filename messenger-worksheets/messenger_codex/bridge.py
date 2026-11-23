@@ -253,11 +253,16 @@ class Messenger:
             is_png = stream.read(8) == b"\x89PNG\r\n\x1a\n"
         if is_png:
             fields = {**common, "text": f"Изображение: {path.name}"}
-            preview = self.client.send_image_with_caption(**fields)
-            result = self.client.send_image_with_caption(
-                **fields, confirm_fingerprint=preview["fingerprint"],
-            )
-        else:
+            try:
+                preview = self.client.send_image_with_caption(**fields)
+            except (OSError, ValueError) as error:
+                print(f"image_preview_fallback_document {type(error).__name__}", flush=True)
+                is_png = False
+            else:
+                result = self.client.send_image_with_caption(
+                    **fields, confirm_fingerprint=preview["fingerprint"],
+                )
+        if not is_png:
             preview = self.client.send_document(**common)
             result = self.client.send_document(
                 **common, confirm_fingerprint=preview["fingerprint"],
@@ -453,8 +458,16 @@ class Bridge:
                 )
         else:
             payload, draft = record
-        self._send_artifacts(parent, stamp)
-        self.messenger.send(parent, draft, payload)
+        try:
+            self._send_artifacts(parent, stamp)
+        except Exception as error:
+            print(f"artifact_delivery_retry {type(error).__name__}", flush=True)
+            raise
+        try:
+            self.messenger.send(parent, draft, payload)
+        except Exception as error:
+            print(f"reply_delivery_retry {type(error).__name__}", flush=True)
+            raise
         with self.db:
             self.db.execute(
                 "UPDATE replies SET draft = NULL WHERE parent = ? AND incoming = ?",
