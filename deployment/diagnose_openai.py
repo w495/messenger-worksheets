@@ -18,6 +18,8 @@ from urllib.request import ProxyHandler, Request, build_opener
 ENV_FILE = Path("/etc/messenger-worksheets/worker.env")
 STATE_DIR = Path("/var/lib/messenger-worksheets-worker")
 REQUIRED = {"WORKSHEET_CODEX_API_KEY", "WORKSHEET_CODEX_BINARY"}
+TARGET_MODEL = "gpt-6.2-sol"
+TARGET_REASONING_EFFORT = "high"
 DISABLED = (
     "shell_tool", "unified_exec", "hooks", "plugins", "multi_agent",
     "multi_agent_v2", "image_generation", "view_image", "skill_search",
@@ -60,21 +62,7 @@ def api_probe(key: str) -> tuple[str, list[str]]:
 
 
 def select_responses_model(models: list[str]) -> str | None:
-    if "gpt-5.6-sol" in models:
-        return "gpt-5.6-sol"
-    excluded = ("audio", "image", "realtime", "search", "transcribe", "tts")
-    codex = sorted(
-        model for model in models
-        if model.startswith("gpt-") and "codex" in model
-        and not any(fragment in model for fragment in excluded)
-    )
-    if codex:
-        return codex[-1]
-    general = sorted(
-        model for model in models
-        if model.startswith("gpt-") and not any(fragment in model for fragment in excluded)
-    )
-    return general[-1] if general else None
+    return TARGET_MODEL if TARGET_MODEL in models else None
 
 
 def safe_identifier(value: object) -> str:
@@ -157,6 +145,7 @@ def codex_probe(binary: str, key: str, model: str) -> str:
         "-c", 'shell_environment_policy.inherit="none"',
         "-c", 'developer_instructions="Reply exactly CODEX_OK"',
         "-c", 'model_provider="openai"',
+        "-c", f'model_reasoning_effort="{TARGET_REASONING_EFFORT}"',
         "--model", model,
         "--sandbox", "read-only",
     ]
@@ -208,6 +197,8 @@ def main() -> None:
     api_status, models = api_probe(values["WORKSHEET_CODEX_API_KEY"])
     print(api_status)
     model = select_responses_model(models)
+    print("target_model=" + TARGET_MODEL)
+    print("target_model_listed=" + str(model is not None).lower())
     if model is None:
         print("responses_api=skipped_no_compatible_model")
     else:

@@ -49,21 +49,25 @@ case $1 in
         trap - EXIT
         echo "Worker configured to use the native Codex binary."
         ;;
-    set-model-gpt-5.6-sol)
+    set-profile-gpt-6.2-sol-high)
         environment=/etc/messenger-worksheets/worker.env
         temporary=$(mktemp /etc/messenger-worksheets/worker.env.XXXXXX)
         trap 'rm -f -- "${temporary}"' EXIT
         awk '
-            BEGIN { replaced = 0 }
-            /^WORKSHEET_CODEX_MODEL=/ { print "WORKSHEET_CODEX_MODEL=gpt-5.6-sol"; replaced = 1; next }
+            BEGIN { model = 0; effort = 0 }
+            /^WORKSHEET_CODEX_MODEL=/ { print "WORKSHEET_CODEX_MODEL=gpt-6.2-sol"; model = 1; next }
+            /^WORKSHEET_CODEX_REASONING_EFFORT=/ { print "WORKSHEET_CODEX_REASONING_EFFORT=high"; effort = 1; next }
             { print }
-            END { if (!replaced) print "WORKSHEET_CODEX_MODEL=gpt-5.6-sol" }
+            END {
+                if (!model) print "WORKSHEET_CODEX_MODEL=gpt-6.2-sol"
+                if (!effort) print "WORKSHEET_CODEX_REASONING_EFFORT=high"
+            }
         ' "${environment}" > "${temporary}"
         chmod 0600 "${temporary}"
         chown root:root "${temporary}"
         mv -f -- "${temporary}" "${environment}"
         trap - EXIT
-        echo "Worker model configured as gpt-5.6-sol."
+        echo "Worker profile configured as gpt-6.2-sol with reasoning high."
         ;;
     start-worker)
         systemctl start worksheet-worker.service

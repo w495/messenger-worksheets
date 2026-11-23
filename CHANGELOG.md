@@ -16,7 +16,7 @@
 - вывод диагностического Codex направлен в `/dev/null`, жёсткий лимит снижен до 45 секунд;
 - диагностический stderr собирается через временный fd и выводится только как безопасная категория;
 - диагностика различает Responses API quota/rate-limit по безопасным `error.type` и `error.code`;
-- для API-key deployment явно закреплена выбранная модель `gpt-5.6-sol`;
+- профиль API-key deployment синхронизирован с Codex config: `gpt-6.2-sol`, reasoning `high`;
 - добавлен официальный `codex login --with-api-key` под изолированным worker через stdin;
 - добавлен временный root-owned `worksheet-admin` с фиксированными операциями и self-revoke;
 - добавлены документация и локальная проверка репозитория.

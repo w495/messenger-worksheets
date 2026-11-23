@@ -22,6 +22,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_RESULT_BYTES = 50 * 1024 * 1024
 IMAGE_TYPES = {"jpeg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp"}
 MODEL_KEY = "WORKSHEET_CODEX_API_KEY"
+REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,10 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
         ))
     else:
         raise ValueError("unsupported worksheet Codex provider")
+    if effort := os.environ.get("WORKSHEET_CODEX_REASONING_EFFORT"):
+        if effort not in REASONING_EFFORTS:
+            raise ValueError("unsupported Codex reasoning effort")
+        argv.extend(("-c", "model_reasoning_effort=" + json.dumps(effort)))
     if request.task:
         allowed = {":minimal": "read", str(binary.resolve().parent): "read", str(workspace): "write"}
         paths = ",".join(f"{json.dumps(path)}={json.dumps(mode)}" for path, mode in allowed.items())
