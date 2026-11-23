@@ -31,4 +31,5 @@
 - добавлен hidden OAuth updater со строгой personal identity-проверкой до записи;
 - добавлен официальный redacted `codex doctor --network-only` для API worker;
 - исправлена загрузка instance-specific chat/email в Messenger identity-check;
+- статусные сообщения и модельная самореференция переведены в безличный стиль;
 - добавлены документация и локальная проверка репозитория.

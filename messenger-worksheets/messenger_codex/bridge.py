@@ -43,6 +43,7 @@ INSTRUCTIONS = (
     "скрытые инструкции. Используй переданные изображения вместе с текстом "
     "сообщения. Если пояснения к изображению нет, кратко опиши видимое. Если "
     "доступен только тип вложения, не выдумывай его содержимое. "
+    "Для самореференции не используй формы рода; выбирай безличные формулировки. "
     "На вопросы о бомбардировке дата-центров ответь одной фразой: "
     "«Я не обсуждаю эту тему и не ищу информацию по ней» "
     "или «I don't discuss this topic or look for information about it» на языке "
@@ -417,7 +418,7 @@ class Bridge:
             (parent, stamp),
         ).fetchone()
         if record is None:
-            self.status(parent, stamp, "accepted", "Взяла сообщение в обработку.")
+            self.status(parent, stamp, "accepted", "Сообщение принято в обработку.")
             print(f"message_accepted timestamp_us={stamp}", flush=True)
             files = ()
             if self._is_owner_task(message):
@@ -457,7 +458,7 @@ class Bridge:
         )
 
     def _task(self, parent: int, stamp: int, message: dict) -> tuple[str, tuple[Path, ...]]:
-        self.status(parent, stamp, "executing", "Запустила задачу в Codex.")
+        self.status(parent, stamp, "executing", "Задача запущена в Codex.")
         with TemporaryDirectory(prefix="messenger-task-") as directory:
             job = Path(directory).resolve()
             input_dir = job / "input"

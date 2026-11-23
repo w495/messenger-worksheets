@@ -61,7 +61,7 @@ class CloudBridge(Bridge):
         return result["text"], result["session"]
 
     def _task(self, parent: int, stamp: int, message: dict) -> tuple[str, tuple[Path, ...]]:
-        self.status(parent, stamp, "executing", "Запустила задачу на облачной ВМ.")
+        self.status(parent, stamp, "executing", "Задача запущена на облачной ВМ.")
         result = self.transfer(parent, stamp, message, task=True, session=None)
         with TemporaryDirectory(prefix="cloud-gateway-results-") as directory:
             output = Path(directory)

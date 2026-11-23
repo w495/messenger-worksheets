@@ -32,6 +32,12 @@ for module in codex_rpc.py codex_worker.py personal_messenger.py; do
         "${repo_root}/messenger-worksheets/messenger_worksheets/${module}" \
         "/opt/messenger-worksheets/app/messenger_worksheets/${module}"
 done
+install -m 0644 -o root -g root \
+    "${repo_root}/messenger-worksheets/messenger_worksheets/cloud_gateway.py" \
+    /opt/messenger-worksheets/app/messenger_worksheets/cloud_gateway.py
+install -m 0644 -o root -g root \
+    "${repo_root}/messenger-worksheets/messenger_codex/bridge.py" \
+    /opt/messenger-worksheets/app/messenger_codex/bridge.py
 install -m 0644 -o root -g root "${deployment_dir}/worksheet-worker-local-user.service" \
     /etc/systemd/system/worksheet-worker-local-user.service
 install -m 0644 -o root -g root "${deployment_dir}/worksheet-gateway-api.service" \
