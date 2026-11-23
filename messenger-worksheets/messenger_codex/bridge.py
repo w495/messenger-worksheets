@@ -476,8 +476,10 @@ class Bridge:
     def _is_our_reply(self, message: dict) -> bool:
         payload = message.get("payload_id")
         return bool(payload and self.db.execute(
-            "SELECT 1 FROM replies WHERE payload = ? UNION ALL SELECT 1 FROM updates WHERE payload = ?",
-            (payload, payload),
+            "SELECT 1 FROM replies WHERE payload = ? "
+            "UNION ALL SELECT 1 FROM updates WHERE payload = ? "
+            "UNION ALL SELECT 1 FROM progress WHERE payload = ?",
+            (payload, payload, payload),
         ).fetchone())
 
     def _delivery_parent(self, parent: int, stamp: int) -> int:

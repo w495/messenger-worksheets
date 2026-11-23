@@ -50,6 +50,7 @@
 - progress timestamp reconciliation учитывает eventual consistency с bounded backoff;
 - progress timestamp извлекается из nested `ServerMessageInfo` push-response;
 - progress start логирует только безопасный delivery failure code и response key shape;
+- progress payload IDs участвуют в self-message filter и не запускают reply loop;
 - `send_outcome_unknown` подтверждается через history по payload/author вместо retry-loop;
 - inclusive history cursor/MaxTimestamp boundaries пропускаются как дубли вместо retry-loop;
 - worker HTTP/connection failures завершают task один раз и продвигают thread cursor;
