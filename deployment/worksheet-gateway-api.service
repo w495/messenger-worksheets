@@ -1,0 +1,38 @@
+[Unit]
+Description=Messenger Worksheets Gateway (API-key instance)
+After=network-online.target worksheet-worker.service
+Wants=network-online.target worksheet-worker.service
+
+[Service]
+Type=simple
+User=worksheet-gateway
+Group=worksheet-gateway
+WorkingDirectory=/opt/messenger-worksheets/app
+Environment=PYTHONPATH=/opt/messenger-worksheets/app
+Environment=HOME=/var/lib/messenger-worksheets-gateway-api
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=LANG=C.UTF-8
+EnvironmentFile=/etc/messenger-worksheets/gateway-api.env
+ExecStart=/opt/messenger-worksheets/venv/bin/python -m messenger_worksheets.cloud_gateway
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=20s
+UMask=0077
+StateDirectory=messenger-worksheets-gateway-api
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

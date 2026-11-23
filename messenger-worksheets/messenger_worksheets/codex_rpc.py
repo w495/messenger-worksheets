@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPSHandler, Request as HTTPRequest, build_opener
 import uuid
 
-from .codex_worker import MAX_IMAGE_BYTES, MAX_RESULT_BYTES, Request, execute
+from .codex_worker import CodexExecutionError, MAX_IMAGE_BYTES, MAX_RESULT_BYTES, Request, execute
 from .worksheet import NoRedirect
 
 
@@ -101,7 +101,8 @@ class JobHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, KeyError):
             self.send_json(422, {"error": "invalid job"})
         except Exception as error:
-            print(f"codex_job_failed {type(error).__name__}", flush=True)
+            category = f" category={error.category}" if isinstance(error, CodexExecutionError) else ""
+            print(f"codex_job_failed {type(error).__name__}{category}", flush=True)
             self.send_json(503, {"error": "worker error"})
 
 

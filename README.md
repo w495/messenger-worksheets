@@ -1,28 +1,24 @@
 # Messenger Worksheets
 
-Автоответчик для отдельного чата Яндекс Мессенджера. Шлюз читает сообщения от
-личного аккаунта и передаёт задания изолированному обработчику Codex. Компоненты
-работают на одной Linux-ВМ под разными системными пользователями.
+Два независимых автоответчика для чатов Яндекс Мессенджера. Оба gateway читают
+сообщения одного личного аккаунта, но используют разные worker, RPC tokens,
+порты и каталоги состояния.
 
 ## Архитектура
 
 ```text
-Яндекс Мессенджер
-        │ OAuth: только worksheet-gateway
-        ▼
-worksheet-gateway.service
-        │ HTTPS на 127.0.0.1 + transport token
-        ▼
-worksheet-worker.service
-        │ OpenAI API key: только worksheet-worker
-        ▼
-codex exec
+API chat ── gateway-api ── HTTPS :8443 ── worker-api ── direct OpenAI API key
+
+Local chat ─ gateway-local ─ HTTPS :8444 ─ worker-local (operator) ─ local Codex auth/config
 ```
 
-- `worksheet-gateway` хранит состояние чата и не получает ключ OpenAI.
-- `worksheet-worker` запускает `codex exec` и не получает OAuth Мессенджера.
+- Gateway хранят раздельное состояние чатов и не получают ключ OpenAI.
+- API worker не получает OAuth Мессенджера и работает под системным пользователем.
+- Local worker не получает OAuth или API key, но работает с правами `operator`,
+  использует его auth и безопасную проекцию model/effort из `~/.codex`; это
+  явно менее изолированный режим.
 - Локальный RPC защищён собственной TLS-цепочкой и случайным транспортным
-  ключом.
+  ключом для каждого instance.
 - Unit-файлы используют разные `StateDirectory` и системных пользователей.
 
 ## Структура

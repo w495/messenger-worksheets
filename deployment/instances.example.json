@@ -1,0 +1,11 @@
+{
+  "expected_email": "user@example.test",
+  "instances": {
+    "api": {
+      "invite": "https://messenger.360.yandex.ru/#/join/API-INVITE"
+    },
+    "local_user": {
+      "invite": "https://messenger.360.yandex.ru/#/join/LOCAL-INVITE"
+    }
+  }
+}

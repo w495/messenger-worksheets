@@ -68,22 +68,27 @@ sudo bash deployment/install_admin_helper.sh
 sudo -n /usr/local/sbin/worksheet-admin revoke
 ```
 
-### Local-user mode
+### Два независимых instance
 
-Отдельный opt-in worker `worksheet-worker-local-user.service` запускает Codex
-от имени `operator` и использует `/home/operator/.codex/config.toml` и официальную
-авторизацию этого пользователя. API key в этот процесс не передаётся.
+Отдельный worker `worksheet-worker-local-user.service` запускает Codex от имени
+`operator` и использует его официальную авторизацию. Из
+`/home/operator/.codex/config.toml` при provisioning копируются только `model` и
+`model_reasoning_effort`; Codex стартует с `--ignore-user-config`. API key,
+MCP, hooks и остальные пользовательские настройки не наследуются.
 
-Режим менее изолирован: worker получает права `operator` и доступ к его home.
-Gateway по-прежнему работает под отдельным `worksheet-gateway`. Одновременно
-работает только один worker на `127.0.0.1:8443`.
+Режим менее изолирован: worker получает права `operator`, доступ к его home,
+собственному TLS key и transport token процесса. Gateway по-прежнему работает
+под отдельным `worksheet-gateway`.
 
-Переключение выполняется временным admin-helper:
+Оба instance могут работать одновременно:
 
 ```bash
-sudo -n /usr/local/sbin/worksheet-admin switch-to-local-user
-sudo -n /usr/local/sbin/worksheet-admin switch-to-api-key
+sudo -n /usr/local/sbin/worksheet-admin start-api-instance
+sudo -n /usr/local/sbin/worksheet-admin start-local-instance
 ```
+
+API instance использует порт `8443` и `gateway-api.env`; local-user instance —
+порт `8444` и `gateway-local-user.env`. StateDirectory и RPC token раздельные.
 
 Не запускайте шлюз до проверки личности аккаунта. Сначала проверьте, что units
 загрузились и обработчик стартует:

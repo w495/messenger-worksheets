@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 import uuid
@@ -10,7 +11,6 @@ import uuid
 from messenger_worksheets.codex_rpc import submit
 
 
-ENV_FILE = Path("/etc/messenger-worksheets/gateway.env")
 REQUIRED = {
     "WORKSHEET_CODEX_TRANSPORT_TOKEN",
     "WORKSHEET_CODEX_WORKER_CA",
@@ -18,9 +18,9 @@ REQUIRED = {
 }
 
 
-def load_rpc_environment() -> None:
+def load_rpc_environment(env_file: Path) -> None:
     found: set[str] = set()
-    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+    for line in env_file.read_text(encoding="utf-8").splitlines():
         if not line or line.startswith("#"):
             continue
         key, separator, value = line.partition("=")
@@ -33,7 +33,10 @@ def load_rpc_environment() -> None:
 
 
 def main() -> None:
-    load_rpc_environment()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--environment-file", type=Path, required=True)
+    args = parser.parse_args()
+    load_rpc_environment(args.environment_file)
     result = submit(
         os.environ["WORKSHEET_CODEX_WORKER_URL"],
         str(uuid.uuid4()),

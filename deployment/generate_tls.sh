@@ -50,5 +50,11 @@ install -m 0644 -o root -g worksheet-worker "${certificate_work}/server.crt" \
     "${destination}/worker/server.crt"
 install -m 0640 -o root -g worksheet-worker "${certificate_work}/server.key" \
     "${destination}/worker/server.key"
+if getent group operator >/dev/null && [[ -d ${destination}/local-user ]]; then
+    install -m 0644 -o root -g operator "${certificate_work}/server.crt" \
+        "${destination}/local-user/server.crt"
+    install -m 0640 -o root -g operator "${certificate_work}/server.key" \
+        "${destination}/local-user/server.key"
+fi
 
 echo "TLS certificate chain generated and verified."

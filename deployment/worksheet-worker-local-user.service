@@ -2,7 +2,6 @@
 Description=Messenger Worksheets Codex Worker (local user mode)
 After=network-online.target
 Wants=network-online.target
-Conflicts=worksheet-worker.service
 
 [Service]
 Type=simple
@@ -13,7 +12,7 @@ Environment=PYTHONPATH=/opt/messenger-worksheets/app
 Environment=HOME=/home/operator
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=LANG=C.UTF-8
-EnvironmentFile=/etc/messenger-worksheets/local-user.env
+EnvironmentFile=/etc/messenger-worksheets/worker-local-user.env
 ExecStart=/opt/messenger-worksheets/venv/bin/python -m messenger_worksheets.codex_rpc
 Restart=on-failure
 RestartSec=5s

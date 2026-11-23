@@ -3,20 +3,20 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 
 
-ENV_FILE = Path("/etc/messenger-worksheets/gateway.env")
 REQUIRED = {
     "WORKSHEET_MESSENGER_CLIENT_DIR",
     "WORKSHEET_MESSENGER_TOKEN",
 }
 
 
-def load_gateway_environment() -> None:
+def load_gateway_environment(env_file: Path) -> None:
     found: set[str] = set()
-    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+    for line in env_file.read_text(encoding="utf-8").splitlines():
         if not line or line.startswith("#"):
             continue
         key, separator, value = line.partition("=")
@@ -30,7 +30,10 @@ def load_gateway_environment() -> None:
 def main() -> None:
     if os.geteuid() != 0:
         raise SystemExit("Run this identity check with sudo.")
-    load_gateway_environment()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--environment-file", type=Path, required=True)
+    args = parser.parse_args()
+    load_gateway_environment(args.environment_file)
     from messenger_codex.bridge import timestamp_now
     from messenger_worksheets.personal_messenger import CHAT, EMAIL, PersonalMessenger
 

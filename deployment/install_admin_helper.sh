@@ -12,9 +12,37 @@ fi
 
 deployment_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "${deployment_dir}/.." && pwd)
-install -m 0644 -o root -g root \
-    "${repo_root}/messenger-worksheets/messenger_worksheets/codex_worker.py" \
-    /opt/messenger-worksheets/app/messenger_worksheets/codex_worker.py
+install -d -m 0750 -o root -g operator /etc/messenger-worksheets/local-user
+install -m 0644 -o root -g operator /etc/messenger-worksheets/worker/server.crt \
+    /etc/messenger-worksheets/local-user/server.crt
+install -m 0640 -o root -g operator /etc/messenger-worksheets/worker/server.key \
+    /etc/messenger-worksheets/local-user/server.key
+instance_config=${deployment_dir}/instances.local.json
+[[ -f ${instance_config} ]] || { echo "Missing deployment/instances.local.json" >&2; exit 1; }
+PYTHONPATH=/opt/messenger-worksheets/app \
+    /opt/messenger-worksheets/venv/bin/python "${deployment_dir}/provision_instances.py" \
+    --config "${instance_config}"
+
+systemd-analyze verify \
+    "${deployment_dir}/worksheet-worker-local-user.service" \
+    "${deployment_dir}/worksheet-gateway-api.service" \
+    "${deployment_dir}/worksheet-gateway-local-user.service"
+for module in codex_rpc.py codex_worker.py personal_messenger.py; do
+    install -m 0644 -o root -g root \
+        "${repo_root}/messenger-worksheets/messenger_worksheets/${module}" \
+        "/opt/messenger-worksheets/app/messenger_worksheets/${module}"
+done
+install -m 0644 -o root -g root "${deployment_dir}/worksheet-worker-local-user.service" \
+    /etc/systemd/system/worksheet-worker-local-user.service
+install -m 0644 -o root -g root "${deployment_dir}/worksheet-gateway-api.service" \
+    /etc/systemd/system/worksheet-gateway-api.service
+install -m 0644 -o root -g root "${deployment_dir}/worksheet-gateway-local-user.service" \
+    /etc/systemd/system/worksheet-gateway-local-user.service
+install -m 0644 -o root -g root "${deployment_dir}/worksheet-gateway.service" \
+    /etc/systemd/system/worksheet-gateway.service
+systemctl daemon-reload
+systemctl disable --now worksheet-gateway.service
+
 install -d -m 0755 -o root -g root /opt/messenger-worksheets/admin
 for script in check_messenger.py diagnose_openai.py login_codex.py smoke_test_worker.py; do
     install -m 0755 -o root -g root "${deployment_dir}/${script}" \
@@ -23,52 +51,17 @@ done
 install -m 0755 -o root -g root "${deployment_dir}/worksheet-admin" \
     /usr/local/sbin/worksheet-admin
 
-install -d -m 0750 -o root -g operator /etc/messenger-worksheets/local-user
-install -m 0644 -o root -g operator /etc/messenger-worksheets/worker/server.crt \
-    /etc/messenger-worksheets/local-user/server.crt
-install -m 0640 -o root -g operator /etc/messenger-worksheets/worker/server.key \
-    /etc/messenger-worksheets/local-user/server.key
-
-transport_token=
-while IFS='=' read -r key value; do
-    if [[ ${key} == WORKSHEET_CODEX_TRANSPORT_TOKEN ]]; then
-        transport_token=${value}
-    fi
-done < /etc/messenger-worksheets/gateway.env
-if [[ ${#transport_token} -lt 32 ]]; then
-    echo "Gateway transport token is missing or too short." >&2
-    exit 1
-fi
-local_env_tmp=$(mktemp)
-sudoers_tmp=
-cleanup() {
-    rm -f -- "${local_env_tmp}"
-    [[ -z ${sudoers_tmp} ]] || rm -f -- "${sudoers_tmp}"
-}
-trap cleanup EXIT
-{
-    printf 'WORKSHEET_CODEX_PROVIDER=local_user\n'
-    printf 'WORKSHEET_CODEX_BINARY=/usr/local/bin/codex\n'
-    printf 'WORKSHEET_CODEX_LISTEN=127.0.0.1\n'
-    printf 'WORKSHEET_CODEX_PORT=8443\n'
-    printf 'WORKSHEET_CODEX_TLS_CERT=/etc/messenger-worksheets/local-user/server.crt\n'
-    printf 'WORKSHEET_CODEX_TLS_KEY=/etc/messenger-worksheets/local-user/server.key\n'
-    printf 'WORKSHEET_CODEX_TRANSPORT_TOKEN=%s\n' "${transport_token}"
-} > "${local_env_tmp}"
-install -m 0600 -o root -g root "${local_env_tmp}" \
-    /etc/messenger-worksheets/local-user.env
-unset transport_token
-install -m 0644 -o root -g root "${deployment_dir}/worksheet-worker-local-user.service" \
-    /etc/systemd/system/worksheet-worker-local-user.service
-systemctl daemon-reload
-systemd-analyze verify /etc/systemd/system/worksheet-worker-local-user.service
-
 sudoers_tmp=$(mktemp)
-for operation in status check-messenger diagnose-openai login-codex smoke-worker set-native-codex \
+trap 'rm -f -- "${sudoers_tmp}"' EXIT
+for operation in status check-messenger-api check-messenger-local \
+    diagnose-openai login-codex smoke-api smoke-local set-native-codex \
     set-profile-gpt-5.3-codex-high \
-    start-worker restart-worker stop-worker switch-to-local-user stop-worker-local \
-    switch-to-api-key start-gateway stop-gateway \
-    logs-worker logs-worker-local logs-gateway revoke; do
+    start-worker-api restart-worker-api stop-worker-api \
+    start-worker-local restart-worker-local stop-worker-local \
+    start-gateway-api stop-gateway-api start-gateway-local stop-gateway-local \
+    start-api-instance stop-api-instance start-local-instance stop-local-instance \
+    enable-instances logs-worker-api logs-worker-local \
+    logs-gateway-api logs-gateway-local revoke; do
     printf 'operator ALL=(root) NOPASSWD: /usr/local/sbin/worksheet-admin %s\n' "${operation}"
 done > "${sudoers_tmp}"
 chmod 0440 "${sudoers_tmp}"
@@ -76,7 +69,7 @@ visudo -cf "${sudoers_tmp}"
 install -m 0440 -o root -g root "${sudoers_tmp}" \
     /etc/sudoers.d/messenger-worksheets-admin
 
-cleanup
+rm -f -- "${sudoers_tmp}"
 trap - EXIT
 
 echo "Temporary restricted worksheet-admin access installed for operator."

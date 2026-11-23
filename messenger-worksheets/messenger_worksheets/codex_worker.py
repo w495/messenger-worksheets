@@ -26,6 +26,27 @@ REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 LOCAL_USER_DISABLED_FEATURES = ("apps", "browser_use", "computer_use", "remote_plugin")
 
 
+class CodexExecutionError(RuntimeError):
+    def __init__(self, category: str):
+        super().__init__(category)
+        self.category = category
+
+
+def failure_category(stderr: str, stdout: str) -> str:
+    diagnostic = (stderr + "\n" + stdout).casefold()
+    for category, pattern in (
+        ("authentication", r"\b401\b|unauthorized|authentication"),
+        ("forbidden", r"\b403\b|forbidden"),
+        ("rate_limited", r"\b429\b|rate limit|usage limit|insufficient_quota"),
+        ("model_unavailable", r"model.*(?:not found|not available|not supported)"),
+        ("connection", r"failed to connect|stream disconnected|request timed out"),
+        ("configuration", r"error loading config|unknown field|invalid value"),
+    ):
+        if re.search(pattern, diagnostic):
+            return category
+    return "unknown"
+
+
 @dataclass(frozen=True)
 class Request:
     text: str
@@ -64,17 +85,14 @@ class Request:
 
 def command(binary: Path, workspace: Path, request: Request, images: tuple[Path, ...]) -> list[str]:
     provider = os.environ.get("WORKSHEET_CODEX_PROVIDER", "endpoint")
-    argv = [str(binary), "exec"]
-    if provider != "local_user":
-        argv.append("--ignore-user-config")
-    argv.extend([
-        "--json", "--skip-git-repo-check",
+    argv = [
+        str(binary), "exec", "--ignore-user-config", "--json", "--skip-git-repo-check",
         "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
         "-c", "project_doc_max_bytes=0", "-c", 'shell_environment_policy.inherit="none"',
         "-c", 'developer_instructions=' + json.dumps(
             INSTRUCTIONS + (TASK_INSTRUCTIONS if request.task else ""), ensure_ascii=False,
         ),
-    ])
+    ]
     if provider == "openai":
         argv.extend((
             "-c", 'model_provider="direct_openai"',
@@ -82,6 +100,9 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
             "-c", 'model_providers.direct_openai.base_url="https://api.openai.com/v1"',
             "-c", 'model_providers.direct_openai.wire_api="responses"',
             "-c", 'model_providers.direct_openai.env_key="OPENAI_API_KEY"',
+            "-c", "model_providers.direct_openai.requires_openai_auth=false",
+            "-c", "model_context_window=16384",
+            "-c", "model_auto_compact_token_limit=12000",
         ))
         if model := os.environ.get("WORKSHEET_CODEX_MODEL"):
             argv.extend(("--model", model))
@@ -100,7 +121,6 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
             "-c", 'model_providers.worksheet_api.env_key=' + json.dumps(MODEL_KEY),
         ))
     elif provider == "local_user":
-        argv.extend(("-c", "mcp_servers={}"))
         if model := os.environ.get("WORKSHEET_CODEX_MODEL"):
             argv.extend(("--model", model))
     else:
@@ -206,13 +226,29 @@ def execute(request: Request, state_dir: Path) -> dict:
             env[MODEL_KEY] = os.environ[MODEL_KEY]
         elif provider != "local_user":
             raise ValueError("unsupported worksheet Codex provider")
-        result = subprocess.run(command(binary, workspace, request, tuple(images)), cwd=workspace,
-                                env=env, input=request.text, text=True, capture_output=True,
-                                check=False, timeout=300 if request.task else 120)
+        def invoke(active: Request) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                command(binary, workspace, active, tuple(images)), cwd=workspace,
+                env=env, input=active.text, text=True, capture_output=True,
+                check=False, timeout=300 if active.task else 120,
+            )
+
+        active_request = request
+        result = invoke(active_request)
+        if result.returncode and request.session:
+            diagnostic = (result.stderr + "\n" + result.stdout).casefold()
+            if re.search(
+                r"no (conversation|session|thread) found|failed to (resume|load) "
+                r"(session|thread)|thread.*(not found|is locked)",
+                diagnostic,
+            ):
+                active_request = Request(request.text, request.task, None, request.images)
+                result = invoke(active_request)
         if result.returncode:
-            raise RuntimeError(f"Codex exited with status {result.returncode}")
-        text, session = final_reply(result.stdout, request)
-        return {"text": text, "session": session, "files": result_files(output) if request.task else []}
+            raise CodexExecutionError(failure_category(result.stderr, result.stdout))
+        text, session = final_reply(result.stdout, active_request)
+        return {"text": text, "session": session,
+                "files": result_files(output) if active_request.task else []}
 
 
 def main() -> None:

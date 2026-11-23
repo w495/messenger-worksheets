@@ -24,4 +24,8 @@
 - добавлен временный root-owned `worksheet-admin` с фиксированными операциями и self-revoke;
 - добавлен opt-in local-user worker для Codex-конфига и auth пользователя `operator`;
 - добавлена read-only проверка точной Messenger identity перед запуском gateway;
+- один переключаемый worker заменён двумя независимыми instances на портах 8443/8444;
+- оба Messenger invite разрешаются read-only при provisioning, chat state и RPC tokens разделены;
+- исправлены gateway dependency, personal account enforcement, mode session fallback и dual TLS rotation;
+- worker logs теперь содержат только безопасную категорию Codex failure без raw stderr;
 - добавлены документация и локальная проверка репозитория.

@@ -15,22 +15,35 @@ admin=/opt/messenger-worksheets/admin
 case $1 in
     status)
         systemctl show worksheet-worker.service worksheet-worker-local-user.service \
+            worksheet-gateway-api.service worksheet-gateway-local-user.service \
             worksheet-gateway.service \
             -p Id -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager
         ;;
     diagnose-openai)
         exec "${python}" "${admin}/diagnose_openai.py"
         ;;
-    check-messenger)
+    check-messenger-api)
         export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/check_messenger.py"
+        exec "${python}" "${admin}/check_messenger.py" \
+            --environment-file /etc/messenger-worksheets/gateway-api.env
+        ;;
+    check-messenger-local)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/check_messenger.py" \
+            --environment-file /etc/messenger-worksheets/gateway-local-user.env
         ;;
     login-codex)
         exec "${python}" "${admin}/login_codex.py"
         ;;
-    smoke-worker)
+    smoke-api)
         export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/smoke_test_worker.py"
+        exec "${python}" "${admin}/smoke_test_worker.py" \
+            --environment-file /etc/messenger-worksheets/gateway-api.env
+        ;;
+    smoke-local)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/smoke_test_worker.py" \
+            --environment-file /etc/messenger-worksheets/gateway-local-user.env
         ;;
     set-native-codex)
         shopt -s nullglob
@@ -74,40 +87,63 @@ case $1 in
         trap - EXIT
         echo "Worker profile configured as gpt-5.3-codex with reasoning high."
         ;;
-    start-worker)
+    start-worker-api)
         systemctl start worksheet-worker.service
         ;;
-    restart-worker)
+    restart-worker-api)
         systemctl restart worksheet-worker.service
         ;;
-    stop-worker)
+    stop-worker-api)
         systemctl stop worksheet-worker.service
         ;;
-    switch-to-local-user)
-        systemctl stop worksheet-worker.service
+    start-worker-local)
         systemctl start worksheet-worker-local-user.service
+        ;;
+    restart-worker-local)
+        systemctl restart worksheet-worker-local-user.service
         ;;
     stop-worker-local)
         systemctl stop worksheet-worker-local-user.service
         ;;
-    switch-to-api-key)
-        systemctl stop worksheet-worker-local-user.service
-        systemctl start worksheet-worker.service
+    start-gateway-api)
+        systemctl start worksheet-gateway-api.service
         ;;
-    start-gateway)
-        systemctl start worksheet-gateway.service
+    stop-gateway-api)
+        systemctl stop worksheet-gateway-api.service
         ;;
-    stop-gateway)
-        systemctl stop worksheet-gateway.service
+    start-gateway-local)
+        systemctl start worksheet-gateway-local-user.service
         ;;
-    logs-worker)
+    stop-gateway-local)
+        systemctl stop worksheet-gateway-local-user.service
+        ;;
+    start-api-instance)
+        systemctl start worksheet-worker.service worksheet-gateway-api.service
+        ;;
+    stop-api-instance)
+        systemctl stop worksheet-gateway-api.service worksheet-worker.service
+        ;;
+    start-local-instance)
+        systemctl start worksheet-worker-local-user.service worksheet-gateway-local-user.service
+        ;;
+    stop-local-instance)
+        systemctl stop worksheet-gateway-local-user.service worksheet-worker-local-user.service
+        ;;
+    enable-instances)
+        systemctl enable worksheet-worker.service worksheet-worker-local-user.service \
+            worksheet-gateway-api.service worksheet-gateway-local-user.service
+        ;;
+    logs-worker-api)
         journalctl -u worksheet-worker.service -n 100 --no-pager
         ;;
     logs-worker-local)
         journalctl -u worksheet-worker-local-user.service -n 100 --no-pager
         ;;
-    logs-gateway)
-        journalctl -u worksheet-gateway.service -n 100 --no-pager
+    logs-gateway-api)
+        journalctl -u worksheet-gateway-api.service -n 100 --no-pager
+        ;;
+    logs-gateway-local)
+        journalctl -u worksheet-gateway-local-user.service -n 100 --no-pager
         ;;
     revoke)
         rm -f -- /etc/sudoers.d/messenger-worksheets-admin

@@ -77,6 +77,22 @@ def safe_identifier(value: object) -> str:
     return value
 
 
+def safe_rate_headers(headers: object) -> str:
+    values = []
+    for name in (
+        "x-ratelimit-limit-requests",
+        "x-ratelimit-remaining-requests",
+        "x-ratelimit-reset-requests",
+        "x-ratelimit-limit-tokens",
+        "x-ratelimit-remaining-tokens",
+        "x-ratelimit-reset-tokens",
+    ):
+        value = headers.get(name) if hasattr(headers, "get") else None
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9. -]{1,100}", value):
+            values.append(name.removeprefix("x-ratelimit-").replace("-", "_") + "=" + value.replace(" ", "_"))
+    return " ".join(values)
+
+
 def responses_probe(key: str, model: str) -> str:
     body = json.dumps({
         "model": model,
@@ -93,7 +109,8 @@ def responses_probe(key: str, model: str) -> str:
     try:
         with build_opener(ProxyHandler({})).open(request, timeout=45) as response:
             response.read(1024 * 1024)
-            return f"responses_api_http={response.status}"
+            limits = safe_rate_headers(response.headers)
+            return f"responses_api_http={response.status}" + (" " + limits if limits else "")
     except HTTPError as error:
         raw = error.read(256 * 1024)
         try:
@@ -102,7 +119,9 @@ def responses_probe(key: str, model: str) -> str:
             details = {}
         error_type = safe_identifier(details.get("type"))
         error_code = safe_identifier(details.get("code"))
-        return f"responses_api_http={error.code} error_type={error_type} error_code={error_code}"
+        limits = safe_rate_headers(error.headers)
+        result = f"responses_api_http={error.code} error_type={error_type} error_code={error_code}"
+        return result + (" " + limits if limits else "")
     except URLError as error:
         return f"responses_api_network_error={type(error.reason).__name__}"
 
@@ -142,19 +161,20 @@ def structured_signals(stderr: str, stdout: str) -> str:
     types: set[str] = set()
     statuses: set[str] = set()
 
-    def visit(value: object) -> None:
+    def visit(value: object, in_error: bool = False) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
-                if key == "code" and safe_identifier(item) != "unknown":
+                child_error = in_error or key == "error"
+                if in_error and key == "code" and safe_identifier(item) != "unknown":
                     codes.add(str(item))
-                elif key == "type" and safe_identifier(item) != "unknown":
+                elif in_error and key == "type" and safe_identifier(item) != "unknown":
                     types.add(str(item))
-                elif key in {"status", "status_code", "http_status"} and isinstance(item, int):
+                elif in_error and key in {"status", "status_code", "http_status"} and isinstance(item, int):
                     statuses.add(str(item))
-                visit(item)
+                visit(item, child_error)
         elif isinstance(value, list):
             for item in value:
-                visit(item)
+                visit(item, in_error)
 
     for line in stdout.splitlines():
         try:
@@ -167,6 +187,20 @@ def structured_signals(stderr: str, stdout: str) -> str:
             codes.add(token)
     for status in re.findall(r"(?<!\d)(401|403|404|429|500|502|503)(?!\d)", lowered):
         statuses.add(status)
+    dimensions = []
+    for name, pattern in (
+        ("tpm", r"tokens per min|\btpm\b"),
+        ("rpm", r"requests per min|\brpm\b"),
+        ("tpd", r"tokens per day|\btpd\b"),
+        ("rpd", r"requests per day|\brpd\b"),
+    ):
+        if re.search(pattern, lowered):
+            dimensions.append(name)
+    numbers = []
+    for label in ("limit", "used", "requested"):
+        match = re.search(rf"\b{label}\s*[:=]?\s*(\d+)", lowered)
+        if match:
+            numbers.append(f"{label}={match.group(1)}")
     parts = []
     if codes:
         parts.append("codes=" + ",".join(sorted(codes)))
@@ -174,6 +208,9 @@ def structured_signals(stderr: str, stdout: str) -> str:
         parts.append("types=" + ",".join(sorted(types)))
     if statuses:
         parts.append("statuses=" + ",".join(sorted(statuses)))
+    if dimensions:
+        parts.append("dimensions=" + ",".join(dimensions))
+    parts.extend(numbers)
     return " ".join(parts) if parts else "signals=none"
 
 
@@ -196,6 +233,9 @@ def codex_probe(binary: str, key: str, model: str) -> str:
         "-c", 'model_providers.direct_openai.base_url="https://api.openai.com/v1"',
         "-c", 'model_providers.direct_openai.wire_api="responses"',
         "-c", 'model_providers.direct_openai.env_key="OPENAI_API_KEY"',
+        "-c", "model_providers.direct_openai.requires_openai_auth=false",
+        "-c", "model_context_window=16384",
+        "-c", "model_auto_compact_token_limit=12000",
         "-c", f'model_reasoning_effort="{TARGET_REASONING_EFFORT}"',
         "--model", model,
         "--sandbox", "read-only",

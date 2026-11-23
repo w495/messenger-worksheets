@@ -23,6 +23,7 @@ file-receipts/
 *.srl
 secrets/
 certificates/
+deployment/instances.local.json
 
 # Editors and operating systems
 .idea/
