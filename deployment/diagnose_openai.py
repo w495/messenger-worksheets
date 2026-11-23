@@ -82,6 +82,7 @@ def responses_probe(key: str, model: str) -> str:
         "model": model,
         "input": "Reply exactly API_OK",
         "max_output_tokens": 128,
+        "reasoning": {"effort": TARGET_REASONING_EFFORT},
         "store": False,
     }).encode()
     request = Request(
@@ -134,6 +135,46 @@ def classify_diagnostic(stderr: str, stdout: str, returncode: int) -> str:
         if re.search(pattern, diagnostic):
             return name
     return f"unknown_exit_{returncode}"
+
+
+def structured_signals(stderr: str, stdout: str) -> str:
+    codes: set[str] = set()
+    types: set[str] = set()
+    statuses: set[str] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "code" and safe_identifier(item) != "unknown":
+                    codes.add(str(item))
+                elif key == "type" and safe_identifier(item) != "unknown":
+                    types.add(str(item))
+                elif key in {"status", "status_code", "http_status"} and isinstance(item, int):
+                    statuses.add(str(item))
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    for line in stdout.splitlines():
+        try:
+            visit(json.loads(line))
+        except (TypeError, ValueError):
+            continue
+    lowered = (stderr + "\n" + stdout).casefold()
+    for token in ("insufficient_quota", "rate_limit_exceeded", "usage_limit_reached", "model_not_found"):
+        if token in lowered:
+            codes.add(token)
+    for status in re.findall(r"(?<!\d)(401|403|404|429|500|502|503)(?!\d)", lowered):
+        statuses.add(status)
+    parts = []
+    if codes:
+        parts.append("codes=" + ",".join(sorted(codes)))
+    if types:
+        parts.append("types=" + ",".join(sorted(types)))
+    if statuses:
+        parts.append("statuses=" + ",".join(sorted(statuses)))
+    return " ".join(parts) if parts else "signals=none"
 
 
 def codex_probe(binary: str, key: str, model: str) -> str:
@@ -196,7 +237,8 @@ def codex_probe(binary: str, key: str, model: str) -> str:
         stderr = stderr_file.read(1024 * 1024)
     if process.returncode:
         reason = classify_diagnostic(stderr, stdout, process.returncode)
-        return f"codex_cli=exit_{process.returncode} reason={reason}"
+        signals = structured_signals(stderr, stdout)
+        return f"codex_cli=exit_{process.returncode} reason={reason} {signals}"
     return "codex_cli=ok"
 
 
