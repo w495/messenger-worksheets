@@ -255,9 +255,11 @@ class Messenger:
         result = self.client.send_message(
             reply, **fields, confirm_fingerprint=preview["fingerprint"],
         )
-        if result["outcome"] not in {"confirmed", "duplicate"} \
-                or result["chat_id"] != self.feed(parent):
-            raise RuntimeError("Messenger did not confirm delivery")
+        outcome = result.get("outcome")
+        if outcome not in {"confirmed", "duplicate"}:
+            raise RuntimeError(f"send_outcome_{outcome}")
+        if result.get("chat_id") != self.feed(parent):
+            raise RuntimeError("send_chat_mismatch")
         info = result.get("message_info") or {}
         timestamp = info.get("Timestamp") or info.get("timestamp")
         if (type(timestamp) is not int or timestamp <= 0) and isinstance(info, dict):
@@ -280,7 +282,11 @@ class Messenger:
                     break
                 time.sleep(0.25 * (attempt + 1))
         if type(timestamp) is not int or timestamp <= 0:
-            raise RuntimeError("Messenger did not return the delivered message timestamp")
+            result_keys = ",".join(sorted(str(key) for key in result))
+            info_keys = ",".join(sorted(str(key) for key in info)) if isinstance(info, dict) else "not_dict"
+            raise RuntimeError(
+                f"send_timestamp_missing result_keys={result_keys} info_keys={info_keys}"
+            )
         return timestamp
 
     def edit(self, parent: int, timestamp: int, text: str) -> None:
@@ -555,7 +561,8 @@ class Bridge:
                     parent, stamp, delivery_parent, "Сообщение принято в обработку …",
                 )
             except Exception as error:
-                print(f"progress_start_failed {type(error).__name__}", flush=True)
+                detail = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+                print(f"progress_start_failed {detail}", flush=True)
                 raise
             print(f"message_accepted timestamp_us={stamp}", flush=True)
             files = ()
