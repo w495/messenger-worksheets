@@ -35,6 +35,8 @@
 - local-user instance разрешает task/image-generation любому участнику по явной настройке;
 - добавлен отдельный sandbox-admin instance для task-запросов всех участников без доступа к `operator` home;
 - worker units разрешают `AF_NETLINK`, необходимый bwrap для локального network namespace;
+- sandbox-admin task-mode включает явно разрешённый внешний network access;
+- sandbox-admin task-mode использует явно разрешённый `danger-full-access` внутри systemd isolation;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;
 - старый API-chat переведён на text-only direct Responses adapter с локальными UUID-сессиями;

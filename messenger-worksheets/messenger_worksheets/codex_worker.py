@@ -152,7 +152,7 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
         argv.extend(("-c", "model_reasoning_effort=" + json.dumps(effort)))
     full_admin_task = provider == "sandbox_admin" and request.task
     if full_admin_task:
-        argv.extend(("--ephemeral", "--sandbox", "workspace-write"))
+        argv.extend(("--ephemeral", "--sandbox", "danger-full-access"))
     elif request.task:
         allowed = {":minimal": "read", str(binary.resolve().parent): "read", str(workspace): "write"}
         paths = ",".join(f"{json.dumps(path)}={json.dumps(mode)}" for path, mode in allowed.items())

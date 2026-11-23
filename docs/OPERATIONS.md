@@ -108,8 +108,11 @@ API instance использует text-only direct Responses adapter (`store=fal
 
 `worksheet-worker-sandbox-admin.service` работает под отдельным системным
 пользователем `worksheet-chat-admin` на порту `8445`. Full Codex toolset
-доступен task-запросам любого участника, но файловая запись ограничена уникальной
-job workspace. `/home/operator`, его токены, SSH и MCP не доступны.
+доступен task-запросам любого участника в режиме `danger-full-access` внутри
+внешней systemd-границы. `/home/operator`, его токены, SSH и MCP не доступны.
+Task-команды имеют внешний network access; это явно разрешено для всех
+участников. Они также могут читать state/auth пользователя `worksheet-chat-admin`,
+что увеличивает риск эксфильтрации данных этого отдельного аккаунта.
 
 Перед первым запуском выполните официальный device login:
 
