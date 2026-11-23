@@ -305,12 +305,17 @@ class Messenger:
         if result["outcome"] != "confirmed":
             raise RuntimeError("Messenger did not confirm status edit")
 
-    def react(self, parent: int, timestamp: int, reaction: str, *, replace: bool = False) -> None:
+    def react(
+        self, parent: int, timestamp: int, reaction: str, *,
+        replace: bool = False, remove: bool = False,
+    ) -> None:
+        if replace and remove:
+            raise ValueError("reaction cannot be replaced and removed together")
         fields = {
             "chat_id": self.feed(parent),
             "timestamp": timestamp,
             "reaction": reaction,
-            "operation": "replace" if replace else "add",
+            "operation": "remove" if remove else ("replace" if replace else "add"),
         }
         preview = self.client.set_reaction(**fields)
         result = self.client.set_reaction(
@@ -428,6 +433,7 @@ class Bridge:
             CREATE TABLE IF NOT EXISTS feeds (parent INTEGER PRIMARY KEY, cursor INTEGER, session TEXT);
             CREATE TABLE IF NOT EXISTS replies (
                 parent INTEGER, incoming INTEGER, payload TEXT UNIQUE, draft TEXT,
+                failed INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (parent, incoming)
             );
             CREATE TABLE IF NOT EXISTS updates (
@@ -449,6 +455,10 @@ class Bridge:
         if "spinner" not in progress_columns:
             with db:
                 db.execute("ALTER TABLE progress ADD COLUMN spinner INTEGER")
+        reply_columns = {row[1] for row in db.execute("PRAGMA table_info(replies)")}
+        if "failed" not in reply_columns:
+            with db:
+                db.execute("ALTER TABLE replies ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
         with db:
             settings = db.execute("SELECT chat, started FROM settings").fetchone()
             if settings is None:
@@ -535,7 +545,10 @@ class Bridge:
         label: str,
         *,
         final: bool = False,
+        failed: bool = False,
     ) -> None:
+        if failed and not final:
+            raise ValueError("failed progress must be final")
         selected_spinner = secrets.randbelow(len(SPINNER_VARIANTS))
         with self.db:
             self.db.execute(
@@ -555,7 +568,10 @@ class Bridge:
                 )
         frames = SPINNER_VARIANTS[spinner]
         next_frame = frame if final else (frame + 1) % len(frames)
-        text = f"✅ {label}" if final else f"`{frames[next_frame]}` {label}"
+        if final:
+            text = f"{'❌' if failed else '✅'} {label}"
+        else:
+            text = f"`{frames[next_frame]}` {label}"
         if message_ts is None:
             message_ts = self.messenger.send(delivery_parent, text, payload)
         else:
@@ -587,9 +603,10 @@ class Bridge:
     ) -> str:
         delivery_parent = self._delivery_parent(parent, stamp)
         record = self.db.execute(
-            "SELECT payload, draft FROM replies WHERE parent = ? AND incoming = ?",
+            "SELECT payload, draft, failed FROM replies WHERE parent = ? AND incoming = ?",
             (parent, stamp),
         ).fetchone()
+        task_succeeded = True
         if record is None:
             try:
                 self.messenger.react(parent, stamp, "👀")
@@ -612,18 +629,23 @@ class Bridge:
                     reason = str(error) if isinstance(error, CodexTurnError) else "timed_out"
                     print(f"task_failed {reason}", flush=True)
                     draft = "Задача завершилась ошибкой Codex. Готовый результат не получен."
+                    task_succeeded = False
             else:
                 draft, session = self._draft(parent, prompt, message, session)
             payload = str(uuid.uuid4())
             with self.db:
-                self.db.execute("INSERT INTO replies VALUES (?, ?, ?, ?)", (parent, stamp, payload, draft))
+                self.db.execute(
+                    "INSERT INTO replies (parent,incoming,payload,draft,failed) VALUES (?,?,?,?,?)",
+                    (parent, stamp, payload, draft, int(not task_succeeded)),
+                )
                 self.db.execute("UPDATE feeds SET session = ? WHERE parent = ?", (session, parent))
                 self.db.executemany(
                     "INSERT INTO artifacts VALUES (?,?,?)",
                     ((parent, stamp, str(path)) for path in files),
                 )
         else:
-            payload, draft = record
+            payload, draft, failed = record
+            task_succeeded = not bool(failed)
         try:
             self._send_artifacts(parent, stamp, delivery_parent=delivery_parent)
         except Exception as error:
@@ -635,11 +657,18 @@ class Bridge:
             print(f"reply_delivery_retry {type(error).__name__}", flush=True)
             raise
         try:
-            self.progress(parent, stamp, delivery_parent, "Готово.", final=True)
+            self.progress(
+                parent, stamp, delivery_parent,
+                "Готово." if task_succeeded else "Ошибка.",
+                final=True, failed=not task_succeeded,
+            )
         except Exception as error:
             print(f"progress_completion_failed {type(error).__name__}", flush=True)
         try:
-            self.messenger.react(parent, stamp, "✅", replace=True)
+            if task_succeeded:
+                self.messenger.react(parent, stamp, "✅", replace=True)
+            else:
+                self.messenger.react(parent, stamp, "👀", remove=True)
         except Exception as error:
             print(f"reaction_completion_failed {type(error).__name__}", flush=True)
         with self.db:

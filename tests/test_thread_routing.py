@@ -6,7 +6,7 @@ import sqlite3
 import unittest
 from unittest.mock import patch
 
-from messenger_codex.bridge import Bridge, Messenger
+from messenger_codex.bridge import Bridge, CodexTurnError, Messenger
 
 
 class FakeMessenger:
@@ -16,6 +16,7 @@ class FakeMessenger:
     def __init__(self):
         self.sent = []
         self.edited = []
+        self.reactions = []
 
     def send(self, parent, text, payload):
         self.sent.append((parent, text, payload))
@@ -23,6 +24,9 @@ class FakeMessenger:
 
     def edit(self, parent, timestamp, text):
         self.edited.append((parent, timestamp, text))
+
+    def react(self, parent, timestamp, reaction, *, replace=False, remove=False):
+        self.reactions.append((parent, timestamp, reaction, replace, remove))
 
 
 class ThreadDiscoveryMessenger(FakeMessenger):
@@ -92,6 +96,23 @@ class ThreadRoutingTest(unittest.TestCase):
             "payload_id": "00000000-0000-0000-0000-000000000098",
             "media": [{"kind": "miscfile"}],
         }))
+
+    def test_failed_task_finishes_with_error_and_removes_eyes(self):
+        database = sqlite3.connect(":memory:")
+        messenger = FakeMessenger()
+        bridge = Bridge(database, messenger, Path("/tmp"))
+        bridge._is_owner_task = lambda message: True
+
+        def fail_task(*args, **kwargs):
+            raise CodexTurnError("worker_http_503")
+
+        bridge._task = fail_task
+        bridge._respond(0, 123, "prompt", {"text": "создай файл"}, None)
+        self.assertEqual(messenger.edited[-1][2], "❌ Ошибка.")
+        self.assertEqual(messenger.reactions, [
+            (0, 123, "👀", False, False),
+            (0, 123, "👀", False, True),
+        ])
 
     def test_history_skips_inclusive_cursor_boundaries(self):
         messenger = object.__new__(Messenger)
