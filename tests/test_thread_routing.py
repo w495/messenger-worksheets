@@ -69,7 +69,7 @@ class ThreadRoutingTest(unittest.TestCase):
         self.assertTrue(messenger.sent[0][1].startswith("`-`"))
         self.assertEqual(len(messenger.edited), 2)
         self.assertTrue(messenger.edited[0][2].startswith("`\\`"))
-        self.assertEqual(messenger.edited[1][2], "`[+]` Готово.")
+        self.assertEqual(messenger.edited[1][2], "✅ Готово.")
         self.assertTrue(bridge._is_our_reply({"payload_id": messenger.sent[0][2]}))
 
     def test_history_skips_inclusive_cursor_boundaries(self):

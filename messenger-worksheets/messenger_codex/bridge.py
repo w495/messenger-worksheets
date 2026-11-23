@@ -523,8 +523,7 @@ class Bridge:
                 )
         frames = SPINNER_VARIANTS[spinner]
         next_frame = frame if final else (frame + 1) % len(frames)
-        marker = "[+]" if final else frames[next_frame]
-        text = f"`{marker}` {label}"
+        text = f"✅ {label}" if final else f"`{frames[next_frame]}` {label}"
         if message_ts is None:
             message_ts = self.messenger.send(delivery_parent, text, payload)
         else:
