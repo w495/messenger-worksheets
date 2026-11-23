@@ -51,6 +51,7 @@
 - добавлен spinner из девяти цветных кругов;
 - добавлен spinner из девяти цветных квадратов;
 - добавлен spinner из восьми монохромных квадратов;
+- добавлен spinner из восьми emoji-стрелок;
 - progress timestamp при отсутствии в push-response сверяется по payload_id через history;
 - progress timestamp reconciliation учитывает eventual consistency с bounded backoff;
 - progress timestamp извлекается из nested `ServerMessageInfo` push-response;
