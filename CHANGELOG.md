@@ -47,6 +47,7 @@
 - вариант spinner с движущимся квадратом удалён;
 - progress timestamp при отсутствии в push-response сверяется по payload_id через history;
 - progress timestamp reconciliation учитывает eventual consistency с bounded backoff;
+- progress timestamp извлекается из nested `ServerMessageInfo` push-response;
 - inclusive history cursor/MaxTimestamp boundaries пропускаются как дубли вместо retry-loop;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;

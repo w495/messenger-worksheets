@@ -260,6 +260,10 @@ class Messenger:
             raise RuntimeError("Messenger did not confirm delivery")
         info = result.get("message_info") or {}
         timestamp = info.get("Timestamp") or info.get("timestamp")
+        if (type(timestamp) is not int or timestamp <= 0) and isinstance(info, dict):
+            nested = info.get("ServerMessageInfo") or {}
+            if isinstance(nested, dict):
+                timestamp = nested.get("Timestamp")
         if type(timestamp) is not int or timestamp <= 0:
             identity = self.client.identity()["guid"]
             for attempt in range(5):
