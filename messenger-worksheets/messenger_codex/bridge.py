@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import stat
 import subprocess
@@ -23,7 +24,16 @@ PAGE_SIZE = 100
 POLL_SECONDS = 10
 THREAD_DISCOVERY_SECONDS = 60
 PROGRESS_SECONDS = 2
-SPINNER_FRAMES = ("[-]", "[\\]", "[|]", "[/]")
+SPINNER_VARIANTS = (
+    ("[-]", "[\\]", "[|]", "[/]"),
+    ("[⠋]", "[⠙]", "[⠹]", "[⠸]", "[⠼]", "[⠴]", "[⠦]", "[⠧]", "[⠇]", "[⠏]"),
+    ("[↑]", "[↗]", "[→]", "[↘]", "[↓]", "[↙]", "[←]", "[↖]"),
+    ("[▪□□□]", "[□▪□□]", "[□□▪□]", "[□□□▪]"),
+    ("[▁]", "[▂]", "[▃]", "[▄]", "[▅]", "[▆]", "[▇]", "[█]"),
+    ("[.  ]", "[.. ]", "[...]", "[ ..]", "[  .]"),
+    ("[●   ]", "[ ●  ]", "[  ● ]", "[   ●]", "[  ● ]", "[ ●  ]"),
+    ("[◴]", "[◷]", "[◶]", "[◵]"),
+)
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 CODEX = Path.home() / ".local/bin/codex"
 TASK_REQUEST = re.compile(
@@ -384,10 +394,14 @@ class Bridge:
             );
             CREATE TABLE IF NOT EXISTS progress (
                 parent INTEGER, incoming INTEGER, delivery_parent INTEGER,
-                message_ts INTEGER, frame INTEGER, payload TEXT UNIQUE,
+                message_ts INTEGER, frame INTEGER, payload TEXT UNIQUE, spinner INTEGER,
                 PRIMARY KEY (parent, incoming)
             );
         """)
+        progress_columns = {row[1] for row in db.execute("PRAGMA table_info(progress)")}
+        if "spinner" not in progress_columns:
+            with db:
+                db.execute("ALTER TABLE progress ADD COLUMN spinner INTEGER")
         with db:
             settings = db.execute("SELECT chat, started FROM settings").fetchone()
             if settings is None:
@@ -460,17 +474,26 @@ class Bridge:
         *,
         final: bool = False,
     ) -> None:
+        selected_spinner = secrets.randbelow(len(SPINNER_VARIANTS))
         with self.db:
             self.db.execute(
-                "INSERT OR IGNORE INTO progress VALUES (?,?,?,?,?,?)",
-                (parent, stamp, delivery_parent, None, -1, str(uuid.uuid4())),
+                "INSERT OR IGNORE INTO progress VALUES (?,?,?,?,?,?,?)",
+                (parent, stamp, delivery_parent, None, -1, str(uuid.uuid4()), selected_spinner),
             )
-        message_ts, frame, payload = self.db.execute(
-            "SELECT message_ts, frame, payload FROM progress WHERE parent=? AND incoming=?",
+        message_ts, frame, payload, spinner = self.db.execute(
+            "SELECT message_ts, frame, payload, spinner FROM progress WHERE parent=? AND incoming=?",
             (parent, stamp),
         ).fetchone()
-        next_frame = frame if final else (frame + 1) % len(SPINNER_FRAMES)
-        marker = "[+]" if final else SPINNER_FRAMES[next_frame]
+        if type(spinner) is not int or not 0 <= spinner < len(SPINNER_VARIANTS):
+            spinner = selected_spinner
+            with self.db:
+                self.db.execute(
+                    "UPDATE progress SET spinner=? WHERE parent=? AND incoming=?",
+                    (spinner, parent, stamp),
+                )
+        frames = SPINNER_VARIANTS[spinner]
+        next_frame = frame if final else (frame + 1) % len(frames)
+        marker = "[+]" if final else frames[next_frame]
         text = f"`{marker}` {label}"
         if message_ts is None:
             message_ts = self.messenger.send(delivery_parent, text, payload)

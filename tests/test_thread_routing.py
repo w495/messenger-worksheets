@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from messenger_codex.bridge import Bridge
 
@@ -45,9 +46,10 @@ class ThreadRoutingTest(unittest.TestCase):
         database = sqlite3.connect(":memory:")
         messenger = FakeMessenger()
         bridge = Bridge(database, messenger, Path("/tmp"))
-        bridge.progress(0, 123, 123, "Сообщение принято …")
-        bridge.progress(0, 123, 123, "Задача выполняется …")
-        bridge.progress(0, 123, 123, "Готово.", final=True)
+        with patch("messenger_codex.bridge.secrets.randbelow", return_value=0):
+            bridge.progress(0, 123, 123, "Сообщение принято …")
+            bridge.progress(0, 123, 123, "Задача выполняется …")
+            bridge.progress(0, 123, 123, "Готово.", final=True)
         self.assertEqual(len(messenger.sent), 1)
         self.assertTrue(messenger.sent[0][1].startswith("`[-]`"))
         self.assertEqual(len(messenger.edited), 2)
