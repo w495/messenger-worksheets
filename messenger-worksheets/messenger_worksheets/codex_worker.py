@@ -76,7 +76,13 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
         ),
     ])
     if provider == "openai":
-        argv.extend(("-c", 'model_provider="openai"'))
+        argv.extend((
+            "-c", 'model_provider="direct_openai"',
+            "-c", 'model_providers.direct_openai.name="Direct OpenAI API"',
+            "-c", 'model_providers.direct_openai.base_url="https://api.openai.com/v1"',
+            "-c", 'model_providers.direct_openai.wire_api="responses"',
+            "-c", 'model_providers.direct_openai.env_key="OPENAI_API_KEY"',
+        ))
         if model := os.environ.get("WORKSHEET_CODEX_MODEL"):
             argv.extend(("--model", model))
     elif provider == "endpoint":
