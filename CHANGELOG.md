@@ -17,6 +17,7 @@
 - диагностический stderr собирается через временный fd и выводится только как безопасная категория;
 - диагностика различает Responses API quota/rate-limit по безопасным `error.type` и `error.code`;
 - профиль API-key deployment синхронизирован с Codex config: `gpt-6.2-sol`, reasoning `high`;
+- диагностика выводит безопасный список текстовых GPT model ID и проверяет target даже вне `/v1/models`;
 - добавлен официальный `codex login --with-api-key` под изолированным worker через stdin;
 - добавлен временный root-owned `worksheet-admin` с фиксированными операциями и self-revoke;
 - добавлены документация и локальная проверка репозитория.

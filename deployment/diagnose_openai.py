@@ -61,8 +61,14 @@ def api_probe(key: str) -> tuple[str, list[str]]:
         return f"openai_api_network_error={type(error.reason).__name__}", []
 
 
-def select_responses_model(models: list[str]) -> str | None:
-    return TARGET_MODEL if TARGET_MODEL in models else None
+def relevant_text_models(models: list[str]) -> list[str]:
+    excluded = ("audio", "image", "realtime", "search", "transcribe", "tts")
+    return sorted(
+        model for model in models
+        if model.startswith("gpt-")
+        and not any(fragment in model for fragment in excluded)
+        and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", model)
+    )
 
 
 def safe_identifier(value: object) -> str:
@@ -196,20 +202,16 @@ def main() -> None:
     values = load_worker_environment()
     api_status, models = api_probe(values["WORKSHEET_CODEX_API_KEY"])
     print(api_status)
-    model = select_responses_model(models)
+    available = relevant_text_models(models)
+    print("available_text_models=" + (",".join(available) if available else "none"))
+    model = TARGET_MODEL
     print("target_model=" + TARGET_MODEL)
-    print("target_model_listed=" + str(model is not None).lower())
-    if model is None:
-        print("responses_api=skipped_no_compatible_model")
-    else:
-        print("responses_model=" + safe_identifier(model))
-        print(responses_probe(values["WORKSHEET_CODEX_API_KEY"], model))
+    print("target_model_listed=" + str(TARGET_MODEL in models).lower())
+    print("responses_model=" + safe_identifier(model))
+    print(responses_probe(values["WORKSHEET_CODEX_API_KEY"], model))
     binary = resolve_native_codex(values["WORKSHEET_CODEX_BINARY"])
     print("codex_binary=native")
-    if model is None:
-        print("codex_cli=skipped_no_compatible_model")
-    else:
-        print(codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"], model))
+    print(codex_probe(binary, values["WORKSHEET_CODEX_API_KEY"], model))
 
 
 if __name__ == "__main__":
