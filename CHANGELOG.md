@@ -43,6 +43,7 @@
 - оба gateway отправляют статусы, ответы и artifacts в тред исходного сообщения;
 - task progress редактирует одно сообщение с BSD spinner и завершает его `[+] Готово.`;
 - spinner случайно выбирается из восьми стилей и сохраняется для task в SQLite;
+- progress timestamp при отсутствии в push-response сверяется по payload_id через history;
 - API диагностика проверяет совместимые fallback-модели текущего Codex CLI;
 - API-key production возвращён на штатный Codex provider `openai`; custom provider оставлен диагностическим;
 - старый API-chat переведён на text-only direct Responses adapter с локальными UUID-сессиями;

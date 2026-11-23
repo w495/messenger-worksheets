@@ -255,10 +255,22 @@ class Messenger:
         result = self.client.send_message(
             reply, **fields, confirm_fingerprint=preview["fingerprint"],
         )
-        if result["outcome"] != "confirmed" or result["chat_id"] != self.feed(parent):
+        if result["outcome"] not in {"confirmed", "duplicate"} \
+                or result["chat_id"] != self.feed(parent):
             raise RuntimeError("Messenger did not confirm delivery")
         info = result.get("message_info") or {}
         timestamp = info.get("Timestamp") or info.get("timestamp")
+        if type(timestamp) is not int or timestamp <= 0:
+            history = self.client.read_history(chat_id=self.feed(parent), limit=50)
+            identity = self.client.identity()["guid"]
+            matching = [
+                message
+                for message in history.get("messages", [])
+                if message.get("payload_id") == payload_id
+                and message.get("author_guid") == identity
+                and type(message.get("ts")) is int
+            ]
+            timestamp = max((message["ts"] for message in matching), default=None)
         if type(timestamp) is not int or timestamp <= 0:
             raise RuntimeError("Messenger did not return the delivered message timestamp")
         return timestamp
@@ -530,9 +542,13 @@ class Bridge:
             (parent, stamp),
         ).fetchone()
         if record is None:
-            self.progress(
-                parent, stamp, delivery_parent, "Сообщение принято в обработку …",
-            )
+            try:
+                self.progress(
+                    parent, stamp, delivery_parent, "Сообщение принято в обработку …",
+                )
+            except Exception as error:
+                print(f"progress_start_failed {type(error).__name__}", flush=True)
+                raise
             print(f"message_accepted timestamp_us={stamp}", flush=True)
             files = ()
             if self._is_owner_task(message):

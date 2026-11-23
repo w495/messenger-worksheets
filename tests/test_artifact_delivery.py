@@ -30,6 +30,25 @@ class RejectingImageClient(FakeClient):
         raise ValueError("invalid test PNG")
 
 
+class MissingTimestampClient:
+    guid = "00000000-0000-0000-0000-000000000099"
+
+    def send_message(self, text, **kwargs):
+        if "confirm_fingerprint" not in kwargs:
+            return {"fingerprint": "message-fingerprint"}
+        return {"outcome": "confirmed", "chat_id": kwargs["chat_id"], "message_info": None}
+
+    def identity(self):
+        return {"guid": self.guid}
+
+    def read_history(self, chat_id, limit):
+        return {"messages": [{
+            "payload_id": "00000000-0000-0000-0000-000000000004",
+            "author_guid": self.guid,
+            "ts": 987654,
+        }]}
+
+
 class ArtifactDeliveryTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -66,6 +85,15 @@ class ArtifactDeliveryTest(unittest.TestCase):
             [kind for kind, _ in self.messenger.client.operations],
             ["image", "document", "document"],
         )
+
+    def test_send_resolves_missing_timestamp_from_history(self):
+        self.messenger.client = MissingTimestampClient()
+        timestamp = self.messenger.send(
+            0,
+            "status",
+            "00000000-0000-0000-0000-000000000004",
+        )
+        self.assertEqual(timestamp, 987654)
 
 
 if __name__ == "__main__":
