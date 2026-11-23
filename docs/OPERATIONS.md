@@ -41,6 +41,16 @@ sudo bash deployment/install.sh
 Installation prepared. Services were not enabled or started.
 ```
 
+Для безопасной замены только OAuth Мессенджера используйте:
+
+```bash
+sudo /opt/messenger-worksheets/venv/bin/python \
+  deployment/update_messenger_oauth.py --config deployment/instances.local.json
+```
+
+Updater сначала проверяет `account=personal` и точный `expected_email`; при
+несовпадении env-файлы не изменяются.
+
 ## 3. Что создаётся
 
 | Объект | Назначение |

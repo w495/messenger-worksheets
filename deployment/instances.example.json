@@ -1,5 +1,6 @@
 {
   "expected_email": "user@example.test",
+  "token_file": "/absolute/private/path/to/messenger-token",
   "instances": {
     "api": {
       "invite": "https://messenger.360.yandex.ru/#/join/API-INVITE"

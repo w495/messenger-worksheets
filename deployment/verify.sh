@@ -12,6 +12,6 @@ if command -v shellcheck >/dev/null 2>&1; then
 fi
 python3 -m compileall -q messenger-worksheets messenger-client \
     deployment/check_messenger.py deployment/provision_instances.py deployment/smoke_test_worker.py \
-    deployment/diagnose_openai.py deployment/login_codex.py
+    deployment/diagnose_openai.py deployment/login_codex.py deployment/update_messenger_oauth.py
 
 echo "Repository checks passed."

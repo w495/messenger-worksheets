@@ -8,7 +8,9 @@ import hmac
 import json
 import os
 from pathlib import Path
+import pwd
 import secrets
+import stat
 import sys
 from tempfile import NamedTemporaryFile
 import tomllib
@@ -29,6 +31,21 @@ def read_env(path: Path) -> dict[str, str]:
         if separator:
             values[key] = value
     return values
+
+
+def read_token_file(path: Path, owner_name: str) -> str:
+    if not path.is_absolute() or path.is_symlink():
+        raise ValueError("token_file must be an absolute regular file, not a symlink")
+    metadata = path.stat()
+    if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= 4096:
+        raise ValueError("token_file has an invalid type or size")
+    allowed_owners = {0, pwd.getpwnam(owner_name).pw_uid}
+    if metadata.st_uid not in allowed_owners or metadata.st_mode & 0o077:
+        raise ValueError("token_file must be owned by root/operator and have mode 0600")
+    token = path.read_text(encoding="utf-8").strip()
+    if not token or any(char.isspace() for char in token):
+        raise ValueError("token_file contains an invalid OAuth value")
+    return token
 
 
 def write_env(path: Path, values: dict[str, str]) -> None:
@@ -95,6 +112,7 @@ def main() -> None:
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
     expected_email = config.get("expected_email")
+    token_file = config.get("token_file")
     instances = config.get("instances")
     if not isinstance(expected_email, str) or not isinstance(instances, dict):
         raise ValueError("invalid instance config")
@@ -103,12 +121,18 @@ def main() -> None:
 
     legacy = read_env(LEGACY_GATEWAY_ENV)
     worker = read_env(API_WORKER_ENV)
+    if token_file is not None:
+        if not isinstance(token_file, str):
+            raise ValueError("token_file must be a path string")
+        messenger_token = read_token_file(Path(token_file), "operator")
+    else:
+        messenger_token = legacy["WORKSHEET_MESSENGER_TOKEN"]
     client_dir = Path(legacy["WORKSHEET_MESSENGER_CLIENT_DIR"]).resolve(strict=True)
     sys.path.insert(0, str(client_dir))
     from client import MessengerUserClient
 
     messenger = MessengerUserClient(
-        legacy["WORKSHEET_MESSENGER_TOKEN"],
+        messenger_token,
         account="personal",
         expected_email=expected_email,
         timeout=12,
@@ -136,7 +160,7 @@ def main() -> None:
 
     common_gateway = {
         "WORKSHEET_MESSENGER_CLIENT_DIR": str(client_dir),
-        "WORKSHEET_MESSENGER_TOKEN": legacy["WORKSHEET_MESSENGER_TOKEN"],
+        "WORKSHEET_MESSENGER_TOKEN": messenger_token,
         "WORKSHEET_MESSENGER_EMAIL": expected_email,
         "WORKSHEET_CODEX_WORKER_CA": str(ETC / "ca.crt"),
     }

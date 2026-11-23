@@ -28,4 +28,5 @@
 - оба Messenger invite разрешаются read-only при provisioning, chat state и RPC tokens разделены;
 - исправлены gateway dependency, personal account enforcement, mode session fallback и dual TLS rotation;
 - worker logs теперь содержат только безопасную категорию Codex failure без raw stderr;
+- добавлен hidden OAuth updater со строгой personal identity-проверкой до записи;
 - добавлены документация и локальная проверка репозитория.
