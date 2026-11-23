@@ -35,6 +35,7 @@ PYTHONPATH=/opt/messenger-worksheets/app \
     --config "${instance_config}"
 
 systemd-analyze verify \
+    "${deployment_dir}/worksheet-worker.service" \
     "${deployment_dir}/worksheet-worker-local-user.service" \
     "${deployment_dir}/worksheet-worker-sandbox-admin.service" \
     "${deployment_dir}/worksheet-gateway-api.service" \
@@ -53,6 +54,8 @@ install -m 0644 -o root -g root \
     /opt/messenger-worksheets/app/messenger_codex/bridge.py
 install -m 0644 -o root -g root "${deployment_dir}/worksheet-worker-local-user.service" \
     /etc/systemd/system/worksheet-worker-local-user.service
+install -m 0644 -o root -g root "${deployment_dir}/worksheet-worker.service" \
+    /etc/systemd/system/worksheet-worker.service
 install -m 0644 -o root -g root "${deployment_dir}/worksheet-worker-sandbox-admin.service" \
     /etc/systemd/system/worksheet-worker-sandbox-admin.service
 install -m 0644 -o root -g root "${deployment_dir}/worksheet-gateway-api.service" \
