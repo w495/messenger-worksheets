@@ -22,6 +22,9 @@ case $1 in
     diagnose-openai)
         exec "${python}" "${admin}/diagnose_openai.py"
         ;;
+    doctor-openai)
+        exec "${python}" "${admin}/doctor_openai.py"
+        ;;
     check-messenger-api)
         export PYTHONPATH=/opt/messenger-worksheets/app
         exec "${python}" "${admin}/check_messenger.py" \

@@ -29,4 +29,6 @@
 - исправлены gateway dependency, personal account enforcement, mode session fallback и dual TLS rotation;
 - worker logs теперь содержат только безопасную категорию Codex failure без raw stderr;
 - добавлен hidden OAuth updater со строгой personal identity-проверкой до записи;
+- добавлен официальный redacted `codex doctor --network-only` для API worker;
+- исправлена загрузка instance-specific chat/email в Messenger identity-check;
 - добавлены документация и локальная проверка репозитория.

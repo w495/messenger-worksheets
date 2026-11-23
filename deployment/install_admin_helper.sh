@@ -44,7 +44,7 @@ systemctl daemon-reload
 systemctl disable --now worksheet-gateway.service
 
 install -d -m 0755 -o root -g root /opt/messenger-worksheets/admin
-for script in check_messenger.py diagnose_openai.py login_codex.py smoke_test_worker.py; do
+for script in check_messenger.py diagnose_openai.py doctor_openai.py login_codex.py smoke_test_worker.py; do
     install -m 0755 -o root -g root "${deployment_dir}/${script}" \
         "/opt/messenger-worksheets/admin/${script}"
 done
@@ -54,7 +54,7 @@ install -m 0755 -o root -g root "${deployment_dir}/worksheet-admin" \
 sudoers_tmp=$(mktemp)
 trap 'rm -f -- "${sudoers_tmp}"' EXIT
 for operation in status check-messenger-api check-messenger-local \
-    diagnose-openai login-codex smoke-api smoke-local set-native-codex \
+    diagnose-openai doctor-openai login-codex smoke-api smoke-local set-native-codex \
     set-profile-gpt-5.3-codex-high \
     start-worker-api restart-worker-api stop-worker-api \
     start-worker-local restart-worker-local stop-worker-local \
