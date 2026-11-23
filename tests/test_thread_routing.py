@@ -24,6 +24,16 @@ class FakeMessenger:
         self.edited.append((parent, timestamp, text))
 
 
+class ThreadDiscoveryMessenger(FakeMessenger):
+    def new_messages(self, *, parent, after):
+        self.discovery_call = (parent, after)
+        return [
+            (101, {"thread_exists": True, "deleted": True}),
+            (102, {"thread_exists": True, "deleted": False}),
+            (103, {"thread_exists": False, "deleted": False}),
+        ]
+
+
 class BoundaryHistoryClient:
     def fanout(self, operation, payload):
         chat = payload["ChatId"]
@@ -80,6 +90,17 @@ class ThreadRoutingTest(unittest.TestCase):
         messenger.render = lambda raw: {"text": "message"}
         messages = messenger.new_messages(parent=0, after=100)
         self.assertEqual([stamp for stamp, _ in messages], [101])
+
+    def test_thread_discovery_removes_deleted_parent_feeds(self):
+        database = sqlite3.connect(":memory:")
+        messenger = ThreadDiscoveryMessenger()
+        bridge = Bridge(database, messenger, Path("/tmp"))
+        with database:
+            database.execute("INSERT INTO feeds VALUES (101, 999, NULL)")
+        bridge._discover_threads()
+        self.assertEqual(messenger.discovery_call, (0, bridge.started))
+        feeds = database.execute("SELECT parent, cursor FROM feeds ORDER BY parent").fetchall()
+        self.assertEqual(feeds, [(0, bridge.started), (102, 102)])
 
 
 if __name__ == "__main__":

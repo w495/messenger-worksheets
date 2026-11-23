@@ -474,11 +474,22 @@ class Bridge:
 
     def _discover_threads(self) -> None:
         parents = self.messenger.new_messages(parent=0, after=self.started)
+        active = [
+            (stamp, stamp)
+            for stamp, message in parents
+            if message["thread_exists"] and not message.get("deleted")
+        ]
+        deleted = [
+            (stamp,)
+            for stamp, message in parents
+            if message.get("deleted")
+        ]
         with self.db:
             self.db.executemany(
                 "INSERT OR IGNORE INTO feeds VALUES (?, ?, NULL)",
-                ((stamp, stamp) for stamp, message in parents if message["thread_exists"]),
+                active,
             )
+            self.db.executemany("DELETE FROM feeds WHERE parent = ?", deleted)
         self.next_thread_discovery = time.monotonic() + THREAD_DISCOVERY_SECONDS
 
     def _poll_feed(self, parent: int, cursor: int, session: str | None) -> None:

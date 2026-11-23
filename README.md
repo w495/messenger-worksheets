@@ -7,19 +7,27 @@
 ## Архитектура
 
 ```text
-API chat ── gateway-api ── HTTPS :8443 ── worker-api ── direct OpenAI API key
+API chat ── gateway-api ── HTTPS :8443 ── worker-api ── direct Responses API
+                         └─ task requests ── HTTPS :8445 ── sandbox-admin Codex
 
-Local chat ─ gateway-local ─ HTTPS :8444 ─ worker-local (operator) ─ local Codex auth/config
+Sandbox chat ─ gateway-sandbox ─ HTTPS :8445 ─ sandbox-admin Codex auth/config
+
+Reserve local-user mode ─ HTTPS :8444 ─ worker-local (operator) ─ local Codex auth/config
 ```
 
 - Gateway хранят раздельное состояние чатов и не получают ключ OpenAI.
 - API worker не получает OAuth Мессенджера и работает под системным пользователем.
-- Local worker не получает OAuth или API key, но работает с правами `operator`,
+- Sandbox-admin worker выполняет task-запросы обоих чатов под отдельным системным
+  пользователем, с полным Codex toolset и внешней сетью внутри systemd-границы.
+- Резервный local-user worker не получает OAuth или API key, но работает с правами `operator`,
   использует его auth и безопасную проекцию model/effort из `~/.codex`; это
   явно менее изолированный режим.
 - Локальный RPC защищён собственной TLS-цепочкой и случайным транспортным
   ключом для каждого instance.
 - Unit-файлы используют разные `StateDirectory` и системных пользователей.
+- Ответы, статусы и файлы отправляются в тред исходного сообщения; PNG также
+  публикуются нативным изображением. Исходное сообщение получает 👀 во время
+  обработки и ✅ после доставки результата.
 
 ## Структура
 
