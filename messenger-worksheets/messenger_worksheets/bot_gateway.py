@@ -266,6 +266,9 @@ class BotCloudBridge(Bridge):
                     result = future.result(timeout=PROGRESS_SECONDS)
                     break
                 except FutureTimeout:
+                    if future.done():
+                        result = future.result()
+                        break
                     try:
                         self.progress(parent, stamp, delivery_parent, "Задача выполняется …")
                     except Exception as error:

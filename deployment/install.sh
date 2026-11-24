@@ -109,7 +109,7 @@ transport_token=$(openssl rand -hex 32)
     printf 'WORKSHEET_CODEX_MODEL=gpt-5.3-codex\n'
     printf 'WORKSHEET_CODEX_REASONING_EFFORT=high\n'
     printf 'WORKSHEET_CODEX_TASK_TIMEOUT=1800\n'
-    printf 'WORKSHEET_CODEX_CHAT_TIMEOUT=120\n'
+    printf 'WORKSHEET_CODEX_CHAT_TIMEOUT=1800\n'
     printf 'WORKSHEET_CODEX_MAX_CONCURRENT_JOBS=4\n'
     printf 'WORKSHEET_CODEX_BINARY=/usr/local/bin/codex\n'
     printf 'WORKSHEET_CODEX_LISTEN=127.0.0.1\n'
@@ -125,7 +125,7 @@ transport_token=$(openssl rand -hex 32)
     printf 'WORKSHEET_MESSENGER_TOKEN=%s\n' "${messenger_oauth}"
     printf 'WORKSHEET_CODEX_WORKER_URL=https://127.0.0.1:8443/v1/codex-worksheet-jobs\n'
     printf 'WORKSHEET_CODEX_TASK_RPC_TIMEOUT=1860\n'
-    printf 'WORKSHEET_CODEX_CHAT_RPC_TIMEOUT=150\n'
+    printf 'WORKSHEET_CODEX_CHAT_RPC_TIMEOUT=1860\n'
     printf 'WORKSHEET_CODEX_WORKER_CA=/etc/messenger-worksheets/ca-api.crt\n'
     printf 'WORKSHEET_CODEX_TRANSPORT_TOKEN=%s\n' "${transport_token}"
 } > "${gateway_tmp}"

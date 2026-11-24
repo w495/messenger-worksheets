@@ -13,6 +13,7 @@ from pathlib import Path
 import ssl
 import sqlite3
 import stat
+import subprocess
 from tempfile import NamedTemporaryFile
 import threading
 from urllib.parse import urlsplit
@@ -33,6 +34,27 @@ MAX_CONCURRENT_JOBS_ENV = "WORKSHEET_CODEX_MAX_CONCURRENT_JOBS"
 MAX_CACHE_FILES = 256
 MAX_CACHE_BYTES = 1024 * 1024 * 1024
 IDEMPOTENCY_MAX_PAGES = 16_384
+TERMINAL_FAILURE_STATUSES = {
+    "worker_timeout": 504,
+    "worker_execution_failed": 503,
+}
+
+
+class WorkerJobFailure(RuntimeError):
+    """Представить сохранённый terminal failure безопасным фиксированным кодом."""
+
+    def __init__(self, error_code: str):
+        """Создать сохранённую ошибку модели с фиксированным HTTP-статусом.
+
+        Параметр error_code — worker_timeout либо worker_execution_failed.
+        Объект хранит этот код и status 504/503; другой код вызывает ValueError.
+        Исходные исключения, prompt и stderr в объект не копируются.
+        """
+        if error_code not in TERMINAL_FAILURE_STATUSES:
+            raise ValueError("invalid worker failure code")
+        super().__init__(error_code)
+        self.error_code = error_code
+        self.status = TERMINAL_FAILURE_STATUSES[error_code]
 
 
 def check_size(data: bytes, maximum: int) -> bytes:
@@ -76,7 +98,7 @@ def rpc_timeout(job: dict) -> int:
     task = job.get("task") is True
     return bounded_environment_int(
         TASK_RPC_TIMEOUT_ENV if task else CHAT_RPC_TIMEOUT_ENV,
-        1860 if task else 150,
+        1860,
         1,
         3660,
     )
@@ -123,7 +145,10 @@ def prune_result_cache(cache: Path, keep: Path) -> None:
 
     entries = []
     for path in cache.glob("*.json"):
-        metadata = path.lstat()
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
         if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
             entries.append((metadata.st_mtime_ns, path, metadata.st_size))
     entries.sort(reverse=True)
@@ -154,7 +179,7 @@ def idempotency_database(state_dir: Path) -> sqlite3.Connection:
         не позволяет выполнить job без предварительной фиксации UUID/digest.
 
     Инварианты безопасности:
-        Tombstone не содержит prompt, result или credentials; удаление тяжёлого
+        Tombstone содержит только UUID/digest, state и фиксированный error_code; удаление тяжёлого
         cache result не разрешает повторно выполнить тот же UUID.
     """
 
@@ -162,11 +187,24 @@ def idempotency_database(state_dir: Path) -> sqlite3.Connection:
     database = sqlite3.connect(path, timeout=30)
     os.chmod(path, 0o600)
     database.execute(f"PRAGMA max_page_count={IDEMPOTENCY_MAX_PAGES}")
-    database.execute(
-        "CREATE TABLE IF NOT EXISTS jobs ("
-        "job_id TEXT PRIMARY KEY, digest TEXT NOT NULL, created_at INTEGER NOT NULL)"
-    )
-    database.commit()
+    try:
+        # Разные UUID имеют разные flock: миграция сериализуется самой SQLite.
+        with database:
+            database.execute("BEGIN IMMEDIATE")
+            database.execute(
+                "CREATE TABLE IF NOT EXISTS jobs ("
+                "job_id TEXT PRIMARY KEY, digest TEXT NOT NULL, created_at INTEGER NOT NULL, "
+                "state TEXT NOT NULL DEFAULT 'unknown', error_code TEXT)"
+            )
+            columns = {row[1] for row in database.execute("PRAGMA table_info(jobs)")}
+            if "state" not in columns:
+                database.execute("ALTER TABLE jobs ADD COLUMN state TEXT NOT NULL DEFAULT 'unknown'")
+            if "error_code" not in columns:
+                database.execute("ALTER TABLE jobs ADD COLUMN error_code TEXT")
+    except Exception:
+        database.close()
+        raise
+
     return database
 
 
@@ -174,8 +212,8 @@ def run_request(body: bytes, state_dir: Path) -> dict:
     """Проверить RPC-конверт, обеспечить идемпотентность job и сохранить результат атомарно.
 
     Параметры: body — RPC body/JSON response; state_dir — приватный state dir.
-    Результат: Результат execute либо ранее сохранённый результат идентичного job body.
-    Исключения: JSONDecodeError; ValueError для envelope/UUID/conflicting replay; OSError/flock/ошибки execute и cache serialization.
+    Результат: Результат execute либо ранее сохранённый результат идентичного job body; terminal failure повторяется без execute.
+    Исключения: JSONDecodeError; ValueError для envelope/UUID/conflicting replay/expired result; WorkerJobFailure для сохранённого отказа; ошибки ФС/SQLite.
     Побочные эффекты: Создаёт results 0700, shard-lock 0600, берёт flock, выполняет job, атомарно заменяет cache-файл и запускает retention.
     Безопасность: Имя/lock выводятся только из канонического UUID; SHA-256 запрещает replay того же job_id с другим body."""
     spec = json.loads(body)
@@ -194,31 +232,61 @@ def run_request(body: bytes, state_dir: Path) -> dict:
         digest = hashlib.sha256(body).hexdigest()
         with closing(idempotency_database(state_dir)) as database:
             row = database.execute(
-                "SELECT digest FROM jobs WHERE job_id=?", (job_id,),
+                "SELECT digest,state,error_code FROM jobs WHERE job_id=?", (job_id,),
             ).fetchone()
             if row is None:
                 database.execute(
-                    "INSERT INTO jobs(job_id,digest,created_at) "
-                    "VALUES(?,?,unixepoch())",
+                    "INSERT INTO jobs(job_id,digest,created_at,state) "
+                    "VALUES(?,?,unixepoch(),'running')",
                     (job_id, digest),
                 )
                 database.commit()
             elif row[0] != digest:
                 raise ValueError("conflicting job replay")
-            elif not destination.exists():
-                raise ValueError("job result expired")
-        if destination.exists():
-            stored = json.loads(destination.read_text(encoding="utf-8"))
-            if stored["digest"] != digest:
-                raise ValueError("conflicting cached result")
-            return stored["result"]
-        result = execute(Request.decode(spec["input"]), state_dir, job_id=job_id)
-        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache, delete=False) as stream:
-            json.dump({"digest": digest, "result": result}, stream)
-            temporary = Path(stream.name)
-        temporary.replace(destination)
-        prune_result_cache(cache, destination)
-        return result
+            elif row[1] == "failed":
+                # Повреждённый/неизвестный код тоже fail-closed и не запускает job.
+                raise WorkerJobFailure(row[2])
+            try:
+                stored = json.loads(destination.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                if row is not None:
+                    # Retention может удалить файл между проверкой и чтением.
+                    raise ValueError("job result expired") from None
+            else:
+                if stored["digest"] != digest:
+                    raise ValueError("conflicting cached result")
+                return stored["result"]
+            request = Request.decode(spec["input"])
+            temporary = None
+            try:
+                result = execute(request, state_dir, job_id=job_id)
+                with NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    json.dump({"digest": digest, "result": result}, stream)
+                temporary.replace(destination)
+                database.execute(
+                    "UPDATE jobs SET state='succeeded',error_code=NULL WHERE job_id=?", (job_id,),
+                )
+                database.commit()
+            except Exception as error:
+                error_code = (
+                    "worker_timeout" if isinstance(error, (subprocess.TimeoutExpired, TimeoutError))
+                    else "worker_execution_failed"
+                )
+                database.execute(
+                    "UPDATE jobs SET state='failed',error_code=? WHERE job_id=?", (error_code, job_id),
+                )
+                database.commit()
+                raise WorkerJobFailure(error_code) from None
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            try:
+                prune_result_cache(cache, destination)
+            except OSError:
+                # Необязательная очистка не меняет уже сохранённый успех.
+                print("codex_result_cache_failed category=retention_io", flush=True)
+            return result
 
 
 class JobHandler(BaseHTTPRequestHandler):
@@ -252,7 +320,7 @@ class JobHandler(BaseHTTPRequestHandler):
         """Аутентифицировать и выполнить один POST job в пределах лимита конкурентности.
 
         Параметры: нет.
-        Результат: Ничего; клиент получает 200, 401, 404, 422, 429 или 503.
+        Результат: Ничего; клиент получает 200, 401, 404, 422, 429, 503 или 504.
         Исключения: Ошибки валидации/worker перехватываются и преобразуются в bounded JSON; OSError send_json/connection может выйти наружу.
         Побочные эффекты: Проверяет path/token/length, захватывает semaphore, читает body, запускает run_request, пишет ответ и освобождает slot.
         Безопасность: Bearer сравнивается compare_digest; body ограничен до чтения, concurrency fail-fast, журнал содержит только тип и безопасную Codex category."""
@@ -276,6 +344,9 @@ class JobHandler(BaseHTTPRequestHandler):
             acquired = True
             result = run_request(self.rfile.read(size), Path(os.environ["STATE_DIRECTORY"]))
             self.send_json(200, result)
+        except WorkerJobFailure as error:
+            print(f"codex_job_failed code={error.error_code}", flush=True)
+            self.send_json(error.status, {"error": error.error_code})
         except (ValueError, TypeError, KeyError):
             self.send_json(422, {"error": "invalid job"})
         except Exception as error:

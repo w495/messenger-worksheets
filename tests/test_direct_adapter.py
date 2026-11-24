@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -11,22 +10,12 @@ import uuid
 from messenger_worksheets import codex_worker
 
 
-class FakeResponse(BytesIO):
-    def __enter__(self):
-        """Возвращает Responses API дубль как контекстный менеджер."""
-        return self
-
-    def __exit__(self, *args):
-        """Завершает контекст Responses API дубля без подавления исключений."""
-        self.close()
-
-
-class FakeOpener:
+class FakeTransport:
     def __init__(self):
-        """Создаёт opener-дубль с последовательностью ответов модели."""
+        """Создаёт дубль транспорта с последовательностью ответов модели."""
         self.requests = []
 
-    def open(self, request, timeout):
+    def __call__(self, request, *, timeout, max_bytes):
         """Записывает запрос модели и возвращает следующий подготовленный ответ."""
         self.requests.append(json.loads(request.data))
         payload = {
@@ -37,7 +26,7 @@ class FakeOpener:
                 "content": [{"type": "output_text", "text": "DIRECT_OK"}],
             }],
         }
-        return FakeResponse(json.dumps(payload).encode())
+        return json.dumps(payload).encode()
 
 
 class DirectAdapterTest(unittest.TestCase):
@@ -45,9 +34,9 @@ class DirectAdapterTest(unittest.TestCase):
         """Создаёт приватное состояние и настраивает direct Responses provider."""
         self.temp = tempfile.TemporaryDirectory()
         self.state = Path(self.temp.name)
-        self.opener = FakeOpener()
-        self.original_opener = codex_worker.build_opener
-        codex_worker.build_opener = lambda *args: self.opener
+        self.opener = FakeTransport()
+        self.original_opener = codex_worker.post_model_response
+        codex_worker.post_model_response = self.opener
         os.environ.update(
             WORKSHEET_CODEX_PROVIDER="responses_direct",
             WORKSHEET_CODEX_MODEL="gpt-5.3-codex",
@@ -57,7 +46,7 @@ class DirectAdapterTest(unittest.TestCase):
 
     def tearDown(self):
         """Восстанавливает окружение после сценария direct adapter."""
-        codex_worker.build_opener = self.original_opener
+        codex_worker.post_model_response = self.original_opener
         self.temp.cleanup()
 
     def test_new_resume_and_replay(self):

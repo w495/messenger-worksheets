@@ -123,6 +123,11 @@ class CloudBridge(Bridge):
                     result = future.result(timeout=PROGRESS_SECONDS)
                     break
                 except FutureTimeout:
+                    if future.done():
+                        # Это может быть TimeoutError самой завершившейся
+                        # операции, а не истечение короткого ожидания progress.
+                        result = future.result()
+                        break
                     try:
                         self.progress(parent, stamp, delivery_parent, "Задача выполняется …")
                     except Exception as error:

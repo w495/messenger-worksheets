@@ -18,13 +18,16 @@ from tempfile import TemporaryDirectory
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request as HTTPRequest, build_opener
+from urllib.request import Request as HTTPRequest
 import uuid
 
 from messenger_codex.bridge import (
     DISABLED_FEATURES, INSTRUCTIONS, NETWORK_TASK_INSTRUCTIONS,
     OFFLINE_TASK_INSTRUCTIONS, TASK_INSTRUCTIONS,
 )
+
+from .model_http import post_model_response
+from .worksheet import CHAT_TIMEOUT_ENV, TASK_TIMEOUT_ENV, execution_timeout
 
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -36,20 +39,6 @@ LOCAL_USER_DISABLED_FEATURES = ("apps", "browser_use", "computer_use", "remote_p
 DIRECT_HISTORY_ITEMS = 20
 DIRECT_HISTORY_BYTES = 64 * 1024
 DIRECT_RESPONSE_BYTES = 2 * 1024 * 1024
-TASK_TIMEOUT_ENV = "WORKSHEET_CODEX_TASK_TIMEOUT"
-CHAT_TIMEOUT_ENV = "WORKSHEET_CODEX_CHAT_TIMEOUT"
-
-
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        """Запретить следование HTTP-перенаправлениям при обращении к модели.
-
-        Параметры: req — HTTP request; fp — response stream; code — HTTP status; msg — status text; headers — headers; newurl — redirect URL.
-        Результат: None, поэтому urllib не следует HTTP redirect.
-        Исключения: Не генерирует собственных исключений.
-        Побочные эффекты: Побочных эффектов нет.
-        Безопасность: Authorization и request body не пересылаются на новый URL."""
-        return None
 
 
 class CodexExecutionError(RuntimeError):
@@ -63,26 +52,6 @@ class CodexExecutionError(RuntimeError):
         Безопасность: Хранит категорию, а не stderr/stdout или API credentials."""
         super().__init__(category)
         self.category = category
-
-
-def execution_timeout(task: bool) -> int:
-    """Вернуть ограниченный timeout Codex для чата или задачи.
-
-    Параметры: task — режим task.
-    Результат: Task/chat timeout в секундах в диапазоне 1..3600.
-    Исключения: ValueError для нецелой или выходящей за диапазон env-настройки.
-    Побочные эффекты: Читает одну переменную окружения.
-    Безопасность: Невалидная конфигурация отклоняется, а не превращается в неограниченное выполнение."""
-    name = TASK_TIMEOUT_ENV if task else CHAT_TIMEOUT_ENV
-    default = 1800 if task else 120
-    raw = os.environ.get(name, str(default))
-    try:
-        value = int(raw)
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer") from error
-    if not 1 <= value <= 3600:
-        raise ValueError(f"{name} must be in range 1..3600")
-    return value
 
 
 def failure_category(stderr: str, stdout: str) -> str:
@@ -394,7 +363,7 @@ def execute_direct_response(request: Request, state_dir: Path, job_id: str | Non
 
     Параметры: request — валидированный Request; state_dir — приватный state dir; job_id — канонический UUID job.
     Результат: Dict text/session/files; task получает отказ без API, chat — ответ и UUID session.
-    Исключения: KeyError/ValueError конфигурации; sqlite3.Error/JSONDecodeError; CodexExecutionError для HTTP/connection/size/status/empty; OSError TLS transport.
+    Исключения: KeyError/ValueError конфигурации; sqlite3.Error/JSONDecodeError; CodexExecutionError для HTTP/connection/size/status/empty; OSError/TimeoutExpired изолированного HTTP-транспорта.
     Побочные эффекты: Читает/обновляет SQLite, отправляет HTTPS Responses request, base64-кодирует images и кеширует turn по job_id.
     Безопасность: store=false, tools=[], tool_choice=none; history bounded, результат job идемпотентен, API key только в Authorization."""
     if request.task:
@@ -445,8 +414,9 @@ def execute_direct_response(request: Request, state_dir: Path, job_id: str | Non
         },
     )
     try:
-        with build_opener(NoRedirect()).open(http_request, timeout=180) as response:
-            raw = response.read(DIRECT_RESPONSE_BYTES + 1)
+        raw = post_model_response(
+            http_request, timeout=execution_timeout(False), max_bytes=DIRECT_RESPONSE_BYTES,
+        )
     except HTTPError as error:
         raise CodexExecutionError(f"responses_http_{error.code}") from None
     except URLError:
@@ -515,7 +485,7 @@ def terminate_process_group(process_id: int) -> None:
 
 def run_codex_process(
     argv: list[str], *, workspace: Path, environment: dict[str, str],
-    text: str, timeout: int,
+    text: str, timeout: float,
 ) -> subprocess.CompletedProcess[str]:
     """Запустить Codex в отдельной process group и гарантировать уборку потомков.
 
@@ -551,6 +521,8 @@ def execute(request: Request, state_dir: Path, job_id: str | None = None) -> dic
     Безопасность: Messenger credentials не передаются; env allowlist зависит от provider, task files берутся только из проверенного out."""
     if os.environ.get("WORKSHEET_CODEX_PROVIDER") == "responses_direct":
         return execute_direct_response(request, state_dir, job_id)
+    job_timeout = execution_timeout(request.task)
+    deadline = time.monotonic() + job_timeout
     binary = Path(os.environ["WORKSHEET_CODEX_BINARY"]).resolve(strict=True)
     chat_workspace = state_dir / "chat"
     chat_workspace.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -583,13 +555,17 @@ def execute(request: Request, state_dir: Path, job_id: str | None = None) -> dic
             Результат: CompletedProcess одного запуска Codex для active Request.
             Исключения: ValueError/KeyError из command/timeout; OSError или TimeoutExpired из run_codex_process.
             Побочные эффекты: Строит argv и запускает отдельную process group с подготовленным env/workspace.
-            Безопасность: Использует active request после возможного сброса session и не расширяет allowlist env."""
+            Безопасность: Обе попытки делят один deadline; истёкший бюджет не запускает новый процесс и не расширяет allowlist env."""
+            argv = command(binary, workspace, active, tuple(images))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, job_timeout)
             return run_codex_process(
-                command(binary, workspace, active, tuple(images)),
+                argv,
                 workspace=workspace,
                 environment=env,
                 text=active.text,
-                timeout=execution_timeout(active.task),
+                timeout=remaining,
             )
 
         active_request = request

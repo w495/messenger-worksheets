@@ -17,6 +17,7 @@ from tempfile import TemporaryDirectory, mkdtemp
 import time
 import uuid
 from collections.abc import Callable
+from urllib.error import HTTPError, URLError
 
 
 LOGIN = "w495"
@@ -40,9 +41,10 @@ SPINNER_VARIANTS = (
 )
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 ARTIFACT_RETRY_LIMIT = 5
+MODEL_EXECUTION_SECONDS = 1800
 CODEX = Path.home() / ".local/bin/codex"
 TASK_REQUEST = re.compile(
-    r"(?:^/task(?:\s|$)|\b(?:сделай|создай|подготовь|построй|собери|нарисуй|"
+    r"(?:^(?:\*\*|__|[*_`])?/task(?:\*\*|__|[*_`])?(?:\s|$)|\b(?:сделай|создай|подготовь|построй|собери|нарисуй|"
     r"замени|переведи|оформи|сгенерируй|обработай|напиши|сохрани)\b|\bhttps?://[^\s<>]+)",
     re.IGNORECASE,
 )
@@ -98,6 +100,42 @@ NETWORK_TASK_INSTRUCTIONS = (
 
 class CodexTurnError(RuntimeError):
     """A classifier safe to publish in the service journal."""
+
+
+def model_failure(error: Exception) -> tuple[str, str]:
+    """Свести ошибку text/task к безопасному коду и сообщению для участника чата.
+
+    Параметры:
+        error: Исключение только из выполнения модельного запроса, не доставки.
+
+    Результат:
+        Пара из кода журнала и понятного текста. HTTP status допускается только
+        как число, а текст произвольного исключения не копируется.
+
+    Побочные эффекты:
+        Отсутствуют; функция не повторяет запрос и не изменяет исключение.
+
+    Инварианты безопасности:
+        Внешние body, URL, stderr, prompt и credentials не попадают в ответ.
+        Строковый код CodexTurnError принимается только по строгому ASCII-шаблону.
+    """
+    if isinstance(error, CodexTurnError):
+        candidate = str(error)
+        reason = candidate if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", candidate) else "model_error"
+    elif isinstance(error, HTTPError):
+        status = error.code
+        reason = f"worker_http_{status}" if type(status) is int and 100 <= status <= 599 else "worker_http_error"
+    elif isinstance(error, (subprocess.TimeoutExpired, TimeoutError)):
+        reason = "timed_out"
+    elif isinstance(error, URLError):
+        reason = "timed_out" if isinstance(error.reason, TimeoutError) else "worker_connection_failed"
+    else:
+        reason = "model_execution_failed"
+    if reason in {"timed_out", "worker_http_504", "worker_timeout"}:
+        text = "Время выполнения запроса истекло. Готовый результат не получен."
+    else:
+        text = "Запрос завершился ошибкой обработки. Готовый результат не получен."
+    return reason, text
 
 
 class ArtifactDeliveryError(RuntimeError):
@@ -203,27 +241,35 @@ def codex_answer(
     }
     environment["PATH"] = "/usr/bin:/bin"
     image_args = [f"--image={image}" for image in images]
+    deadline = time.monotonic() + MODEL_EXECUTION_SECONDS
 
     def run(*session_args: str) -> subprocess.CompletedProcess[str]:
         """Выполнить подготовленную команду Codex для нового, возобновлённого или форкнутого сеанса.
 
         Параметры: session_args — аргументы resume/fork.
         Результат: CompletedProcess с кодом выхода, stdout и stderr одного запуска Codex.
-        Исключения: subprocess.TimeoutExpired в chat-режиме; OSError при невозможности запустить процесс; исключение callback progress.
+        Исключения: subprocess.TimeoutExpired при исчерпании общего бюджета;
+            OSError при невозможности запустить процесс; исключение callback progress.
         Побочные эффекты: Создаёт subprocess, передаёт prompt через stdin; при зависании task вызывает progress и принудительно завершает процесс.
         Безопасность: Использует заранее собранные argv и минимальное окружение без shell."""
         args = [*command, *session_args, *image_args, "-"]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(args, MODEL_EXECUTION_SECONDS)
         if progress is None:
             return subprocess.run(args, cwd=workspace, env=environment, input=text, text=True,
-                                  capture_output=True, timeout=120, check=False)
+                                  capture_output=True, timeout=remaining, check=False)
         with subprocess.Popen(args, cwd=workspace, env=environment, text=True,
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
             try:
                 try:
-                    stdout, stderr = process.communicate(text, timeout=15)
+                    stdout, stderr = process.communicate(text, timeout=min(15, remaining))
                 except subprocess.TimeoutExpired:
                     progress()
-                    stdout, stderr = process.communicate(timeout=285)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(args, MODEL_EXECUTION_SECONDS)
+                    stdout, stderr = process.communicate(timeout=remaining)
             finally:
                 if process.poll() is None:
                     process.kill()
@@ -914,7 +960,9 @@ class Bridge:
         Параметры: parent — ID треда; 0 означает основной chat; stamp — timestamp входящего сообщения; prompt — готовый JSON-промпт; message — нормализованное сообщение; session — UUID сессии или None.
         Результат: UUID сессии после обычного ответа либо прежнее значение для
             task/игнорируемого сообщения; None, если сессии ещё нет.
-        Исключения: Повторно передаёт ArtifactDeliveryRetry и ошибки обязательной доставки/SQLite; CodexTurnError/TimeoutExpired task преобразует в контролируемый текст.
+        Исключения: Повторно передаёт ArtifactDeliveryRetry и ошибки обязательной
+            доставки/SQLite. Исключения выполнения модели в обоих режимах
+            преобразуются в сохранённый ошибочный ответ без нового запуска модели.
         Побочные эффекты: Ставит реакции и progress, запускает draft/task, сохраняет reply/artifacts, доставляет файлы и ответ, затем фиксирует cursor.
         Безопасность: Перед любыми реакциями, task/draft и сохранением состояния
             текст повторно очищается от комментариев; переданный prompt строится
@@ -945,16 +993,15 @@ class Bridge:
                 raise
             print(f"message_accepted timestamp_us={stamp}", flush=True)
             files = ()
-            if self._is_owner_task(message):
-                try:
+            try:
+                if self._is_owner_task(message):
                     draft, files = self._task(parent, stamp, message, delivery_parent=delivery_parent)
-                except (CodexTurnError, subprocess.TimeoutExpired) as error:
-                    reason = str(error) if isinstance(error, CodexTurnError) else "timed_out"
-                    print(f"task_failed {reason}", flush=True)
-                    draft = "Задача завершилась ошибкой Codex. Готовый результат не получен."
-                    task_succeeded = False
-            else:
-                draft, session = self._draft(parent, prompt, message, session)
+                else:
+                    draft, session = self._draft(parent, prompt, message, session)
+            except Exception as error:
+                reason, draft = model_failure(error)
+                print(f"request_failed {reason}", flush=True)
+                task_succeeded = False
             payload = str(uuid.uuid4())
             with self.db:
                 self.db.execute(

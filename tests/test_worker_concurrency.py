@@ -19,15 +19,15 @@ class WorkerConcurrencyTest(unittest.TestCase):
     def test_configured_task_and_rpc_timeouts(self):
         """Проверяет раздельные настраиваемые timeout исполнения и RPC."""
         with patch.dict(os.environ, {
-            "WORKSHEET_CODEX_TASK_TIMEOUT": "1800",
-            "WORKSHEET_CODEX_CHAT_TIMEOUT": "120",
-            "WORKSHEET_CODEX_TASK_RPC_TIMEOUT": "1860",
-            "WORKSHEET_CODEX_CHAT_RPC_TIMEOUT": "150",
+            "WORKSHEET_CODEX_TASK_TIMEOUT": "1234",
+            "WORKSHEET_CODEX_CHAT_TIMEOUT": "987",
+            "WORKSHEET_CODEX_TASK_RPC_TIMEOUT": "1300",
+            "WORKSHEET_CODEX_CHAT_RPC_TIMEOUT": "1000",
         }):
-            self.assertEqual(codex_worker.execution_timeout(True), 1800)
-            self.assertEqual(codex_worker.execution_timeout(False), 120)
-            self.assertEqual(codex_rpc.rpc_timeout({"task": True}), 1860)
-            self.assertEqual(codex_rpc.rpc_timeout({"task": False}), 150)
+            self.assertEqual(codex_worker.execution_timeout(True), 1234)
+            self.assertEqual(codex_worker.execution_timeout(False), 987)
+            self.assertEqual(codex_rpc.rpc_timeout({"task": True}), 1300)
+            self.assertEqual(codex_rpc.rpc_timeout({"task": False}), 1000)
 
     def test_two_task_requests_execute_concurrently(self):
         """Проверяет параллельное исполнение двух job потоковым worker."""

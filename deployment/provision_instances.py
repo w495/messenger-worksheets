@@ -279,7 +279,7 @@ def main() -> None:
     worker["WORKSHEET_CODEX_MODEL"] = "gpt-5.3-codex"
     worker["WORKSHEET_CODEX_REASONING_EFFORT"] = "high"
     worker["WORKSHEET_CODEX_TASK_TIMEOUT"] = "1800"
-    worker["WORKSHEET_CODEX_CHAT_TIMEOUT"] = "120"
+    worker["WORKSHEET_CODEX_CHAT_TIMEOUT"] = "1800"
     worker["WORKSHEET_CODEX_MAX_CONCURRENT_JOBS"] = "4"
     write_env(API_WORKER_ENV, worker)
     local_gateway_path = ETC / "gateway-local-user.env"
@@ -306,7 +306,7 @@ def main() -> None:
         "WORKSHEET_MESSENGER_EMAIL": expected_email,
         "WORKSHEET_REPLY_IN_THREADS": "true",
         "WORKSHEET_CODEX_TASK_RPC_TIMEOUT": "1860",
-        "WORKSHEET_CODEX_CHAT_RPC_TIMEOUT": "150",
+        "WORKSHEET_CODEX_CHAT_RPC_TIMEOUT": "1860",
     }
     write_env(ETC / "gateway-api.env", {
         **common_gateway,
@@ -341,6 +341,8 @@ def main() -> None:
             raise ValueError("invalid Team bot display name")
         bot_token = read_token_file(Path(bot["token_file"]), "w495")
         write_env(ETC / "gateway-bot.env", {
+            "WORKSHEET_CODEX_TASK_RPC_TIMEOUT": "1860",
+            "WORKSHEET_CODEX_CHAT_RPC_TIMEOUT": "1860",
             "WORKSHEET_BOT_TOKEN": bot_token,
             "WORKSHEET_BOT_AUTH_SCHEME": bot.get("auth_scheme", "OAuth"),
             "WORKSHEET_BOT_BASE_URL": bot.get(
@@ -372,7 +374,7 @@ def main() -> None:
         "WORKSHEET_CODEX_MODEL": local_model,
         "WORKSHEET_CODEX_REASONING_EFFORT": local_effort,
         "WORKSHEET_CODEX_TASK_TIMEOUT": "1800",
-        "WORKSHEET_CODEX_CHAT_TIMEOUT": "120",
+        "WORKSHEET_CODEX_CHAT_TIMEOUT": "1800",
         "WORKSHEET_CODEX_MAX_CONCURRENT_JOBS": "4",
         "WORKSHEET_ENABLE_IMAGE_GENERATION": "true",
         "WORKSHEET_CODEX_LISTEN": "127.0.0.1",
@@ -387,7 +389,7 @@ def main() -> None:
         "WORKSHEET_CODEX_MODEL": local_model,
         "WORKSHEET_CODEX_REASONING_EFFORT": local_effort,
         "WORKSHEET_CODEX_TASK_TIMEOUT": "1800",
-        "WORKSHEET_CODEX_CHAT_TIMEOUT": "120",
+        "WORKSHEET_CODEX_CHAT_TIMEOUT": "1800",
         "WORKSHEET_CODEX_MAX_CONCURRENT_JOBS": "4",
         "WORKSHEET_ENABLE_IMAGE_GENERATION": "true",
         "WORKSHEET_CODEX_LISTEN": "127.0.0.1",
