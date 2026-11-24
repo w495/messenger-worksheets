@@ -85,3 +85,15 @@ class WorkerThreadContextTest(unittest.TestCase):
         self.assertEqual(body['input'][0]['content'][0]['text'].count('UNIQUE_PREVIOUS'), 1)
         self.assertIn('/plan', body['instructions'])
         self.assertEqual(body['tools'], [])
+
+    def test_tools_get_fixed_path_without_inheriting_operator_environment(self):
+        """Sandbox helper находит системный bwrap, не наследуя пользовательские PATH и секреты."""
+        request = worker.Request.decode(self.payload(task=True, options={'mode': 'review'}))
+        with patch.dict(os.environ, {'WORKSHEET_CODEX_PROVIDER': 'sandbox_admin',
+                                    'PATH': '/tmp/untrusted-tools', 'SYNTHETIC_PRIVATE_VALUE': 'do-not-inherit'}, clear=True):
+            argv = worker.command(Path('/bin/true'), Path('/tmp'), request, ())
+        self.assertIn('shell_environment_policy.inherit="none"', argv)
+        self.assertIn('shell_environment_policy.set.PATH="/usr/local/bin:/usr/bin:/bin"', argv)
+        self.assertIn('read-only', argv)
+        self.assertNotIn('danger-full-access', argv)
+        self.assertFalse(any('/tmp/untrusted-tools' in item or 'do-not-inherit' in item for item in argv))

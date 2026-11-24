@@ -184,6 +184,7 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
         str(binary), "exec", "--ignore-user-config", "--json", "--skip-git-repo-check",
         "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
         "-c", "project_doc_max_bytes=0", "-c", 'shell_environment_policy.inherit="none"',
+        "-c", 'shell_environment_policy.set.PATH="/usr/local/bin:/usr/bin:/bin"',
         "-c", 'developer_instructions=' + json.dumps(
             INSTRUCTIONS + model_identity + task_instructions + option_instructions(request.options), ensure_ascii=False,
         ),
