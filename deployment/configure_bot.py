@@ -34,13 +34,16 @@ def main() -> None:
         symlink; итоговые файлы создаются в заранее выбранных каталогах.
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expected-name", default="Lang Env Bot")
+    parser.add_argument("--expected-name", required=True)
     parser.add_argument("--expected-organization-id", type=int)
     parser.add_argument("--auth-scheme", choices=("OAuth", "OAuthTeam"), default="OAuth")
     parser.add_argument(
         "--base-url", default="https://botapi.messenger.yandex.net/bot/v1/",
     )
-    parser.add_argument("--token-file", type=Path, default=Path.home() / ".langenv/bot-token")
+    parser.add_argument(
+        "--token-file", type=Path,
+        default=Path.home() / ".config/messenger-worksheets/bot-token",
+    )
     parser.add_argument(
         "--config", type=Path,
         default=REPO_ROOT / "deployment/instances.local.json",

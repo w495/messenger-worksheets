@@ -378,6 +378,9 @@ def main() -> None:
     Безопасность: Проверяет display_name/organization, требует два разных chat ID и продвигает offset только после обработки update."""
     os.umask(0o077)
     state = Path(os.environ["STATE_DIRECTORY"])
+    expected_name = os.environ.get("WORKSHEET_BOT_EXPECTED_NAME", "").strip()
+    if not expected_name:
+        raise ValueError("WORKSHEET_BOT_EXPECTED_NAME is required")
     token = os.environ["WORKSHEET_BOT_TOKEN"]
     client = BotApiClient(
         token,
@@ -387,7 +390,6 @@ def main() -> None:
         ),
     )
     identity = client.identity()
-    expected_name = os.environ.get("WORKSHEET_BOT_EXPECTED_NAME", "Lang Env Bot")
     if identity.get("display_name") != expected_name:
         raise ValueError("Bot API identity does not match expected display name")
     expected_organization = os.environ.get("WORKSHEET_BOT_EXPECTED_ORGANIZATION_ID")

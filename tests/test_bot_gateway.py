@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from io import BytesIO
+from contextlib import redirect_stderr
 import json
+import os
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from messenger_worksheets.bot_api import BotApiClient
 from messenger_worksheets.bot_gateway import BotCloudBridge, BotMessenger
+from messenger_worksheets import bot_gateway
 
 
 class Response(BytesIO):
@@ -47,13 +52,13 @@ class BotApiTest(unittest.TestCase):
     def test_identity_updates_and_text_use_public_api_contract(self):
         """Проверяет публичные Bot API контракты identity, updates и sendText."""
         opener = Opener([
-            json.dumps({"ok": True, "id": "bot-id", "login": "lang-env-bot"}).encode(),
+            json.dumps({"ok": True, "id": "bot-id", "login": "test-bot"}).encode(),
             json.dumps({"ok": True, "updates": [{"update_id": 12}]}).encode(),
             json.dumps({"ok": True, "message_id": 12345}).encode(),
         ])
         client = BotApiClient("test-token")
         client._opener = opener
-        self.assertEqual(client.identity()["login"], "lang-env-bot")
+        self.assertEqual(client.identity()["login"], "test-bot")
         self.assertEqual(client.get_updates(12), [{"update_id": 12}])
         message_id = client.send_text(
             "0/0/00000000-0000-0000-0000-000000000000",
@@ -106,7 +111,7 @@ class BotGatewayTest(unittest.TestCase):
         self.messenger = BotMessenger(
             FakeBotClient(),
             "0/0/00000000-0000-0000-0000-000000000000",
-            {"id": "bot-guid", "login": "lang-env-bot"},
+            {"id": "bot-guid", "login": "test-bot"},
         )
         self.bridge = BotCloudBridge(
             self.database, self.messenger, Path(self.temp.name),
@@ -153,6 +158,29 @@ class BotGatewayTest(unittest.TestCase):
             "from": {"id": "bot-guid", "robot": True},
             "text": "self reply",
         })
+
+
+class BotConfigurationTest(unittest.TestCase):
+    def test_gateway_requires_expected_name_before_connecting(self):
+        """Без явного имени Bot gateway отклоняет запуск до сетевой авторизации."""
+        with patch.dict(os.environ, {"STATE_DIRECTORY": "/unused"}, clear=True), \
+                patch.object(bot_gateway, "BotApiClient") as client:
+            with self.assertRaisesRegex(ValueError, "WORKSHEET_BOT_EXPECTED_NAME is required"):
+                bot_gateway.main()
+        client.assert_not_called()
+
+    def test_configurator_requires_expected_name_before_requesting_token(self):
+        """Конфигуратор требует имя в CLI до скрытого ввода токена и записи файлов."""
+        from deployment import configure_bot
+        from io import StringIO
+
+        with patch.object(sys, "argv", ["configure_bot.py"]), \
+                patch.object(configure_bot, "getpass") as getpass, \
+                redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                configure_bot.main()
+        self.assertEqual(caught.exception.code, 2)
+        getpass.assert_not_called()
 
 
 if __name__ == "__main__":

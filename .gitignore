@@ -29,7 +29,7 @@ deployment/instances.local.json
 # Optional external code and user-supplied artwork are not part of this release
 /messenger-client/client.py
 /messenger-client/transport.py
-/assets/lang-env-bot-avatar.png
+/assets/bot-avatar.png
 
 # Editors and operating systems
 .idea/

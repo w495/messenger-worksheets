@@ -104,10 +104,10 @@ for script in check_bot.py check_messenger.py diagnose_openai.py doctor_openai.p
     install -m 0755 -o root -g root "${deployment_dir}/${script}" \
         "/opt/messenger-worksheets/admin/${script}"
 done
-if [[ -f ${repo_root}/assets/lang-env-bot-avatar.png ]]; then
+if [[ -f ${repo_root}/assets/bot-avatar.png ]]; then
     install -d -m 0755 -o root -g root /opt/messenger-worksheets/assets
-    install -m 0644 -o root -g root "${repo_root}/assets/lang-env-bot-avatar.png" \
-        /opt/messenger-worksheets/assets/lang-env-bot-avatar.png
+    install -m 0644 -o root -g root "${repo_root}/assets/bot-avatar.png" \
+        /opt/messenger-worksheets/assets/bot-avatar.png
 fi
 install -m 0755 -o root -g root "${deployment_dir}/worksheet-admin" \
     /usr/local/sbin/worksheet-admin
