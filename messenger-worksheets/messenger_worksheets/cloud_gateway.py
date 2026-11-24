@@ -37,6 +37,8 @@ class CloudBridge(Bridge):
         Исключения: ValueError для полей, текста, списка файлов, task/session или chat UUID; ошибки download/base64/submit.
         Побочные эффекты: Временно скачивает изображения, кодирует base64 и выполняет HTTPS RPC.
         Безопасность: Job UUID детерминирован из фиксированного CHAT/parent/stamp; наружу передаётся только data-only payload."""
+        if message_prompt(message, parent) is None:
+            raise ValueError("message has no model content")
         with TemporaryDirectory(prefix="cloud-gateway-images-") as directory:
             paths = self.messenger.download_images(message.get("media", []), Path(directory))
             images = [

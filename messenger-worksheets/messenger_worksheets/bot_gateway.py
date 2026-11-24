@@ -190,6 +190,8 @@ class BotCloudBridge(Bridge):
         Исключения: ValueError для структуры/типов/UUID результата; ошибки download/base64/submit, включая HTTPError/URLError.
         Побочные эффекты: Во временный каталог скачивает изображения, читает/base64-кодирует их и делает HTTPS RPC.
         Безопасность: Job ID детерминирован из chat/parent/stamp; worker получает только JSON prompt и ограниченные изображения."""
+        if message_prompt(message, parent) is None:
+            raise ValueError("message has no model content")
         with TemporaryDirectory(prefix="bot-gateway-images-") as directory:
             paths = self.messenger.download_images(message.get("media", []), Path(directory))
             images = [

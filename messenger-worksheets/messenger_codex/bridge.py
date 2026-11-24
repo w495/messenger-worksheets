@@ -557,14 +557,75 @@ class Messenger:
         return tuple(paths)
 
 
+def strip_prompt_comments(text: str) -> str:
+    """Удалить человеческие комментарии из текста одного входящего сообщения.
+
+    Параметры:
+        text: Исходный текст сообщения. Строки с # или // после необязательных
+            отступов и блоки /* ... */ считаются комментариями.
+
+    Результат:
+        Текст без комментариев. Переводы строк сохраняются; блок заменяется
+        пробелом, чтобы соседние слова не склеивались. Вложенные блоки поддержаны,
+        незакрытый блок удаляет хвост до конца текущего сообщения.
+
+    Побочные эффекты:
+        Отсутствуют. Состояние блока не переносится между сообщениями.
+
+    Инварианты безопасности:
+        Комментарии удаляются до определения task-маршрута и построения RPC.
+        Обход линейный; // внутри URL и # внутри обычной строки сохраняются.
+    """
+    result = []
+    index = 0
+    depth = 0
+    line_start = True
+    line_breaks = "\r\n\u0085\u2028\u2029"
+    while index < len(text):
+        char = text[index]
+        if depth:
+            if text.startswith("/*", index):
+                depth += 1
+                index += 2
+                continue
+            if text.startswith("*/", index):
+                depth -= 1
+                index += 2
+                continue
+            if char in line_breaks:
+                result.append(char)
+                line_start = True
+            index += 1
+            continue
+        if line_start and (char == "#" or text.startswith("//", index)):
+            while index < len(text) and text[index] not in line_breaks:
+                index += 1
+            continue
+        if text.startswith("/*", index):
+            result.append(" ")
+            depth = 1
+            index += 2
+            continue
+        result.append(char)
+        if char in line_breaks:
+            line_start = True
+        elif not char.isspace():
+            line_start = False
+        index += 1
+    return "".join(result)
+
+
 def message_prompt(message: dict, parent: int, image_count: int = 0) -> str | None:
     """Сформировать ограниченный JSON-промпт из нормализованного сообщения.
 
     Параметры: message — нормализованное сообщение; parent — ID треда; 0 означает основной chat; image_count — число приложенных изображений.
-    Результат: JSON-строку с текстом и метаданными вложений либо None для удалённого, системного или пустого сообщения.
+    Результат: JSON-строку с очищенным текстом и метаданными вложений либо None
+        для удалённого, системного, пустого или состоящего только из комментариев сообщения.
     Исключения: TypeError/AttributeError только при нарушении внутреннего контракта нормализованного message.
     Побочные эффекты: Побочных эффектов нет.
-    Безопасность: В prompt не попадает содержимое неизвестных вложений: только типы, счётчик и булевы признаки."""
+    Безопасность: Комментарии не включаются в prompt; сообщение только из
+        комментариев игнорируется также при наличии вложений или неизвестных полей.
+        Неизвестные вложения описываются только типами и булевым признаком."""
     if message.get("deleted") or message.get("system_event"):
         return None
     media = [
@@ -572,7 +633,10 @@ def message_prompt(message: dict, parent: int, image_count: int = 0) -> str | No
         for item in message.get("media", [])
         if item.get("kind") or item.get("type")
     ]
-    text = message.get("text") or ""
+    original = message.get("text") or ""
+    text = strip_prompt_comments(original)
+    if original.strip() and not text.strip():
+        return None
     if not (text or media or message.get("unknown_content")):
         return None
     return json.dumps({
@@ -844,14 +908,22 @@ class Bridge:
 
     def _respond(
         self, parent: int, stamp: int, prompt: str, message: dict, session: str | None,
-    ) -> str:
+    ) -> str | None:
         """Полностью обработать входящее сообщение, доставить артефакты и зафиксировать ответ.
 
         Параметры: parent — ID треда; 0 означает основной chat; stamp — timestamp входящего сообщения; prompt — готовый JSON-промпт; message — нормализованное сообщение; session — UUID сессии или None.
-        Результат: UUID сессии после обычного ответа либо прежнее значение для task.
+        Результат: UUID сессии после обычного ответа либо прежнее значение для
+            task/игнорируемого сообщения; None, если сессии ещё нет.
         Исключения: Повторно передаёт ArtifactDeliveryRetry и ошибки обязательной доставки/SQLite; CodexTurnError/TimeoutExpired task преобразует в контролируемый текст.
         Побочные эффекты: Ставит реакции и progress, запускает draft/task, сохраняет reply/artifacts, доставляет файлы и ответ, затем фиксирует cursor.
-        Безопасность: Durable reply/payload предотвращает повторный Codex turn; terminal artifact failure ограничен и отражён в финальном статусе."""
+        Безопасность: Перед любыми реакциями, task/draft и сохранением состояния
+            текст повторно очищается от комментариев; переданный prompt строится
+            заново из сообщения. Durable reply/payload предотвращает повторный
+            Codex turn; terminal artifact failure отражён в финальном статусе."""
+        prompt = message_prompt(message, parent)
+        if prompt is None:
+            return session
+        message = {**message, "text": strip_prompt_comments(message.get("text") or "")}
         delivery_parent = self._delivery_parent(parent, stamp)
         record = self.db.execute(
             "SELECT payload, draft, failed FROM replies WHERE parent = ? AND incoming = ?",
@@ -964,7 +1036,7 @@ class Bridge:
         allow_any = os.environ.get("WORKSHEET_ALLOW_TASKS_FROM_ANY_PARTICIPANT") == "true"
         return (
             (allow_any or message.get("author_guid") == self.messenger.identity["guid"])
-            and bool(TASK_REQUEST.search(message.get("text") or ""))
+            and bool(TASK_REQUEST.search(strip_prompt_comments(message.get("text") or "").lstrip()))
         )
 
     def _task(
