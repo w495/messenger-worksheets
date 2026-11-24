@@ -131,7 +131,9 @@ def model_failure(error: Exception) -> tuple[str, str]:
         reason = "timed_out" if isinstance(error.reason, TimeoutError) else "worker_connection_failed"
     else:
         reason = "model_execution_failed"
-    if reason in {"timed_out", "worker_http_504", "worker_timeout"}:
+    if reason == "worker_cancelled":
+        text = "Задача остановлена по команде /stop."
+    elif reason in {"timed_out", "worker_http_504", "worker_timeout"}:
         text = "Время выполнения запроса истекло. Готовый результат не получен."
     else:
         text = "Запрос завершился ошибкой обработки. Готовый результат не получен."
@@ -400,6 +402,38 @@ class Messenger:
                 break
             payload["MaxTimestamp"] = oldest
         return sorted(messages.items())
+
+    def context_messages(self, parent: int, before: int, after: int = 0) -> list[tuple[int, dict]]:
+        """Прочитать исходный запрос и ограниченный хвост истории одного треда.
+
+        Параметры: parent — точный timestamp корня; before — исключительная
+        верхняя граница текущего запроса; after — барьер последнего сброса.
+        Возвращает до 41 нормализованного сообщения строго между границами.
+        Выполняет только read-only запросы message_info/history текущего чата.
+        Ошибки источника передаются вызывающему коду; чужие чаты не читаются.
+        """
+        result = {}
+        if after < parent < before:
+            result[parent] = self.client._message_info(self.chat, parent)
+        chat = self.feed(parent)
+        response = self.client.fanout("history", {
+            "ChatId": chat, "Limit": 40, "MaxTimestamp": before,
+            "MinTimestamp": max(after, parent) + 1,
+        })
+        rooms = response.get("Chats")
+        if (response.get("Status") not in (None, 0, "Success")
+                or response.get("ErrorInfos") or not isinstance(rooms, list)
+                or len(rooms) != 1 or rooms[0].get("ChatId") != chat
+                or rooms[0].get("Status") not in (None, 0, "Success")):
+            raise RuntimeError("unexpected Messenger context response")
+        for raw in (rooms[0].get("Messages") or [])[:40]:
+            server = raw.get("ServerMessage") or raw
+            stamp = (server.get("ServerMessageInfo") or {}).get("Timestamp")
+            if type(stamp) is not int:
+                raise RuntimeError("context message timestamp is missing")
+            if max(after, parent) < stamp < before:
+                result[stamp] = self.render(raw)
+        return sorted(result.items())
 
     def send(self, parent: int, reply: str, payload_id: str) -> int:
         """Идемпотентно отправить текст и вернуть подтверждённую серверную отметку сообщения.
@@ -695,6 +729,8 @@ def message_prompt(message: dict, parent: int, image_count: int = 0) -> str | No
 
 
 class Bridge:
+    uses_thread_context = False
+
     def __init__(self, db: sqlite3.Connection, messenger: Messenger, workspace: Path):
         """Инициализировать схему состояния моста и привязать её к одному чату.
 
@@ -760,6 +796,102 @@ class Bridge:
                 raise ValueError("state belongs to a different chat")
             else:
                 self.started = settings[1]
+
+    def _context_store(self):
+        """Открыть лениво приватную память тредов на основном SQLite-соединении.
+
+        Возвращает один ThreadContextStore для состояния этого gateway.
+        Создаёт таблицы и каталог рядом с gateway; вызывается только из
+        основного потока, чтобы SQLite не пересекала границу executor.
+        Ошибки ФС и SQLite передаются без подмены пустым контекстом.
+        """
+        from messenger_worksheets.thread_context import ThreadContextStore
+
+        if not hasattr(self, "thread_context"):
+            self.thread_context = ThreadContextStore(
+                self.db, self.workspace / "thread-context", strip_prompt_comments,
+            )
+        return self.thread_context
+
+    def _prepare_thread_context(self, parent: int, stamp: int, message: dict) -> dict:
+        """Сохранить запрос и подготовить ограниченную историю до запуска RPC.
+
+        Корень сообщения основного чата образует отдельный контекст. При первом
+        обращении в существующем треде читается его корень и хвост истории.
+        Комментарии и служебные статусы исключаются; ответы assistant сохраняются
+        без фильтрации кода. Возвращает копию сообщения с внутренним snapshot,
+        который разрешено читать в transfer без обращения к SQLite.
+        Ошибка bootstrap не подменяется вымышленной историей и журналируется
+        только типом; следующий запрос сможет повторить чтение.
+        """
+        from messenger_worksheets.chat_commands import chat_command
+
+        store = self._context_store()
+        thread = parent or stamp
+        if not store.is_initialized(thread):
+            initialized = True
+            if parent and callable(getattr(self.messenger, "context_messages", None)):
+                try:
+                    history = self.messenger.context_messages(parent, stamp, store.cutoff(thread))
+                    if not isinstance(history, list):
+                        raise ValueError("invalid Messenger context history")
+                except Exception as error:
+                    initialized = False
+                    history = []
+                    print(f"thread_context_bootstrap_failed {type(error).__name__}", flush=True)
+                for previous_stamp, previous in history:
+                    if previous.get("deleted"):
+                        continue
+                    text = previous.get("text") or ""
+                    if not isinstance(text, str) or not text.strip():
+                        continue
+                    if previous.get("author_guid") == self.messenger.identity.get("guid"):
+                        payload = previous.get("payload_id")
+                        service_payload = payload and self.db.execute(
+                            "SELECT 1 FROM updates WHERE payload=? UNION ALL "
+                            "SELECT 1 FROM progress WHERE payload=?", (payload, payload),
+                        ).fetchone()
+                        if service_payload or self._is_context_service_message(text):
+                            continue
+                        role = "assistant"
+                    else:
+                        role = "user"
+                        if chat_command(text) in {"stop", "status", "reset", "help", "model"}:
+                            continue
+                    store.remember(thread, previous_stamp, role, text)
+            if initialized:
+                store.mark_initialized(thread)
+        store.remember(thread, stamp, "user", message.get("text") or "")
+        snapshot = store.snapshot(thread, before=stamp)
+        self.db.commit()
+        return {**message, "_thread_context": snapshot}
+
+    @staticmethod
+    def _is_context_service_message(text: str) -> bool:
+        """Отличить служебные статусы от содержательного ответа при bootstrap.
+
+        Проверяет только полные строки известных индикаторов и подтверждений
+        управления. Не удаляет произвольный HTML или код ответа. Побочных
+        эффектов нет; содержимое пользовательских сообщений сюда не передаётся.
+        """
+        return bool(re.fullmatch(
+            r"(?:`[^`\n]{1,32}`\s*)?(?:Сообщение принято в обработку|Задача (?:запущена|выполняется))\s*[….]*"
+            r"|[✅❌]\s*(?:Готово|Ошибка)\."
+            r"|(?:Контекст треда очищен|Задача остановлена)\.", text.strip(),
+        ))
+
+    def _reset_thread_context(self, thread_id: int, stamp: int) -> None:
+        """Очистить память только указанного треда и установить барьер истории.
+
+        Удаляет приватные копии файлов и ledger до timestamp команды reset,
+        обнуляет native session треда. Метод не отменяет выполняющуюся задачу:
+        вызывающий обработчик обязан сначала проверить отсутствие active job.
+        После успешного commit прежняя история не восстанавливается bootstrap.
+        Ошибки ФС/SQLite передаются и не выдаются за успешный сброс.
+        """
+        self._context_store().reset(thread_id, stamp)
+        with self.db:
+            self.db.execute("UPDATE feeds SET session=NULL WHERE parent=?", (thread_id,))
 
     def poll(self) -> None:
         """Выполнить один цикл обнаружения тредов и обработки всех активных лент.
@@ -909,7 +1041,8 @@ class Bridge:
         frames = SPINNER_VARIANTS[spinner]
         next_frame = frame if final else (frame + 1) % len(frames)
         if final:
-            text = f"{'❌' if failed else '✅'} {label}"
+            marker = "⏹" if label == "Остановлено." else ("❌" if failed else "✅")
+            text = f"{marker} {label}"
         else:
             text = f"`{frames[next_frame]}` {label}"
         if message_ts is None:
@@ -972,12 +1105,16 @@ class Bridge:
         if prompt is None:
             return session
         message = {**message, "text": strip_prompt_comments(message.get("text") or "")}
+        if self.uses_thread_context:
+            message = self._prepare_thread_context(parent, stamp, message)
+            session = None
         delivery_parent = self._delivery_parent(parent, stamp)
         record = self.db.execute(
             "SELECT payload, draft, failed FROM replies WHERE parent = ? AND incoming = ?",
             (parent, stamp),
         ).fetchone()
         task_succeeded = True
+        cancelled = False
         if record is None:
             try:
                 self.messenger.react(parent, stamp, "👀")
@@ -1002,11 +1139,12 @@ class Bridge:
                 reason, draft = model_failure(error)
                 print(f"request_failed {reason}", flush=True)
                 task_succeeded = False
+                cancelled = reason == "worker_cancelled"
             payload = str(uuid.uuid4())
             with self.db:
                 self.db.execute(
                     "INSERT INTO replies (parent,incoming,payload,draft,failed) VALUES (?,?,?,?,?)",
-                    (parent, stamp, payload, draft, int(not task_succeeded)),
+                    (parent, stamp, payload, draft, 2 if cancelled else int(not task_succeeded)),
                 )
                 self.db.execute("UPDATE feeds SET session = ? WHERE parent = ?", (session, parent))
                 self.db.executemany(
@@ -1016,6 +1154,25 @@ class Bridge:
         else:
             payload, draft, failed = record
             task_succeeded = not bool(failed)
+            cancelled = failed == 2
+        if self.uses_thread_context:
+            try:
+                store = self._context_store()
+                thread = parent or stamp
+                store.remember(thread, stamp, "user", message["text"], task=self._is_owner_task(message))
+                store.remember(thread, stamp, "assistant", draft)
+                paths = tuple(Path(row[0]) for row in self.db.execute(
+                    "SELECT path FROM artifacts WHERE parent=? AND incoming=? AND failed=0",
+                    (parent, stamp),
+                ))
+                if paths:
+                    store.remember_files(thread, stamp, paths)
+                self.db.commit()
+            except Exception as error:
+                # Ответ и delivery-пути уже durable: необязательная память
+                # не должна отменять доставку готового результата или повторять модель.
+                self.db.rollback()
+                print(f"thread_context_cache_failed {type(error).__name__}", flush=True)
         try:
             failed_artifacts = self._send_artifacts(
                 parent, stamp, delivery_parent=delivery_parent,
@@ -1051,13 +1208,15 @@ class Bridge:
         try:
             self.progress(
                 parent, stamp, delivery_parent,
-                "Готово." if task_succeeded else "Ошибка.",
+                "Остановлено." if cancelled else ("Готово." if task_succeeded else "Ошибка."),
                 final=True, failed=not task_succeeded,
             )
         except Exception as error:
             print(f"progress_completion_failed {type(error).__name__}", flush=True)
         try:
-            if task_succeeded:
+            if cancelled:
+                self.messenger.react(parent, stamp, "👀", remove=True)
+            elif task_succeeded:
                 self.messenger.react(parent, stamp, "✅", replace=True)
             else:
                 self.messenger.react(parent, stamp, "💔", replace=True)
@@ -1083,7 +1242,9 @@ class Bridge:
         allow_any = os.environ.get("WORKSHEET_ALLOW_TASKS_FROM_ANY_PARTICIPANT") == "true"
         return (
             (allow_any or message.get("author_guid") == self.messenger.identity["guid"])
-            and bool(TASK_REQUEST.search(strip_prompt_comments(message.get("text") or "").lstrip()))
+            and (bool(TASK_REQUEST.search(strip_prompt_comments(message.get("text") or "").lstrip()))
+                 or bool(message.get("_thread_context", {}).get("task"))
+                 or message.get("_request_mode") in {"plan", "review"})
         )
 
     def _task(

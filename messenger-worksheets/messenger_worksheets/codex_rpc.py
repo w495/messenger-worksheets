@@ -20,12 +20,13 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPSHandler, Request as HTTPRequest, build_opener
 import uuid
 
-from .codex_worker import CodexExecutionError, MAX_IMAGE_BYTES, MAX_RESULT_BYTES, Request, execute
+from .codex_worker import CodexExecutionError, MAX_HISTORY_BYTES, MAX_IMAGE_BYTES, MAX_RESULT_BYTES, Request, execute
+from .model_http import JobCancelled, JobCleanupFailed, cancellation_scope, check_cancellation
 from .worksheet import NoRedirect
 
 
 JOB_PATH = "/v1/codex-worksheet-jobs"
-MAX_INPUT_BYTES = ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 128 * 1024
+MAX_INPUT_BYTES = ((MAX_IMAGE_BYTES + MAX_HISTORY_BYTES + 2) // 3) * 4 + 512 * 1024
 MAX_OUTPUT_BYTES = ((MAX_RESULT_BYTES + 2) // 3) * 4 + 128 * 1024
 TRANSPORT_KEY = "WORKSHEET_CODEX_TRANSPORT_TOKEN"
 TASK_RPC_TIMEOUT_ENV = "WORKSHEET_CODEX_TASK_RPC_TIMEOUT"
@@ -37,7 +38,11 @@ IDEMPOTENCY_MAX_PAGES = 16_384
 TERMINAL_FAILURE_STATUSES = {
     "worker_timeout": 504,
     "worker_execution_failed": 503,
+    "worker_cancelled": 409,
 }
+_ACTIVE_JOBS: dict[tuple[str, str], threading.Event] = {}
+_ACTIVE_LOCK = threading.RLock()
+JOB_STATES = {"unknown", "running", "cancelling", "cancelled", "completed", "failed"}
 
 
 class WorkerJobFailure(RuntimeError):
@@ -134,6 +139,109 @@ def submit(
         return json.loads(check_size(result.read(MAX_OUTPUT_BYTES + 1), MAX_OUTPUT_BYTES))
 
 
+def control_request(
+    endpoint: str, suffix: str, *, method: str,
+    transport_token: str | None = None, ca_file: str | None = None,
+) -> dict:
+    """Выполнить короткий управляющий запрос к тому же проверенному HTTPS worker.
+
+    Параметры: endpoint — настроенный JOB_PATH, suffix — внутренний маршрут,
+    method — GET/POST; token/CA выбирают тот же профиль, что и submit. Возвращает
+    JSON-объект не более 16 KiB. ValueError, HTTP/TLS/JSON-ошибки передаются
+    вызывающему. Redirect запрещён; credentials не попадают в URL или журнал.
+    """
+    url = urlsplit(endpoint)
+    if (url.scheme != "https" or not url.hostname or url.username is not None
+            or url.password is not None or url.query or url.fragment or url.path != JOB_PATH):
+        raise ValueError("invalid worksheet worker address")
+    context = ssl.create_default_context(cafile=ca_file or os.environ["WORKSHEET_CODEX_WORKER_CA"])
+    opener = build_opener(NoRedirect(), HTTPSHandler(context=context))
+    request = HTTPRequest(endpoint + suffix, method=method,
+                          data=b"" if method == "POST" else None, headers={
+        "Authorization": "Bearer " + (transport_token or os.environ[TRANSPORT_KEY]),
+    })
+    with opener.open(request, timeout=10) as response:
+        result = json.loads(check_size(response.read(16 * 1024 + 1), 16 * 1024))
+    if not isinstance(result, dict):
+        raise ValueError("invalid worker control result")
+    return result
+
+
+def job_control(
+    endpoint: str, job_id: str, *, action: str = "status",
+    transport_token: str | None = None, ca_file: str | None = None,
+) -> dict:
+    """Прочитать статус UUID либо запросить отмену только этой задачи.
+
+    Параметры: endpoint/token/CA — профиль worker; job_id — канонический UUID;
+    action — status/cancel. Возвращает проверенные job_id/state и безопасные
+    времена/код ошибки. Отмена может вернуть cancelling: остановка подтверждена
+    только state=cancelled. Неверные аргументы/ответ вызывают ValueError;
+    сетевые ошибки не скрываются и не трактуются как успешная остановка.
+    """
+    if not isinstance(job_id, str) or str(uuid.UUID(job_id)) != job_id:
+        raise ValueError("invalid job identifier")
+    if action not in {"status", "cancel"}:
+        raise ValueError("invalid job control action")
+    result = control_request(
+        endpoint, "/" + job_id + ("/cancel" if action == "cancel" else ""),
+        method="POST" if action == "cancel" else "GET",
+        transport_token=transport_token, ca_file=ca_file,
+    )
+    if (result.keys() != {"job_id", "state", "created_at", "updated_at", "error_code"}
+            or result.get("job_id") != job_id or result.get("state") not in JOB_STATES
+            or any(value is not None and type(value) is not int
+                   for value in (result.get("created_at"), result.get("updated_at")))
+            or result.get("error_code") not in {None, *TERMINAL_FAILURE_STATUSES}):
+        raise ValueError("invalid worker job status")
+    return result
+
+
+def worker_capabilities(
+    endpoint: str, *, transport_token: str | None = None, ca_file: str | None = None,
+) -> dict:
+    """Прочитать действующие model/effort/mode worker без выдачи приватных настроек.
+
+    Параметры задают тот же профиль, что submit. Возвращает только четыре
+    allowlist-поля; отсутствующие model/effort остаются None. Повреждённый ответ
+    вызывает ValueError; сетевые ошибки передаются. Не загружает конфиги шлюза
+    и не раскрывает endpoint модели, ключи, HOME или пути пользователя.
+    """
+    result = control_request(endpoint, "/capabilities", method="GET",
+                             transport_token=transport_token, ca_file=ca_file)
+    if (result.keys() != {"model", "reasoning_effort", "mode", "task_supported"}
+            or result["mode"] not in {"responses_direct", "openai", "direct_openai", "endpoint", "local_user", "sandbox_admin"}
+            or type(result["task_supported"]) is not bool
+            or any(value is not None and (not isinstance(value, str) or not value or len(value) > 100)
+                   for value in (result["model"], result["reasoning_effort"]))):
+        raise ValueError("invalid worker capabilities")
+    return result
+
+
+def effective_capabilities() -> dict:
+    """Вернуть только настройки, фактически передаваемые модели текущим worker.
+
+    Не принимает параметров. Model/effort берутся из рабочего env; native CLI
+    запускается с --ignore-user-config, поэтому изменения ~/.codex/config.toml
+    не выдаются за применённые до provisioning/restart. Для CLI без override
+    возвращается None, поскольку собственный default CLI здесь неизвестен.
+    API direct имеет явный default effort=medium. Побочных эффектов нет.
+    """
+    mode = os.environ.get("WORKSHEET_CODEX_PROVIDER", "endpoint")
+    if mode not in {"responses_direct", "openai", "direct_openai", "endpoint", "local_user", "sandbox_admin"}:
+        raise ValueError("unsupported worksheet Codex provider")
+    model = os.environ.get("WORKSHEET_CODEX_MODEL") or None
+    effort = os.environ.get("WORKSHEET_CODEX_REASONING_EFFORT") or (
+        "medium" if mode == "responses_direct" else None
+    )
+    if model is not None and (len(model) > 100 or any(not (c.isascii() and (c.isalnum() or c in "_.-")) for c in model)):
+        raise ValueError("invalid effective model")
+    if effort is not None and effort not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+        raise ValueError("invalid effective effort")
+    return {"model": model, "reasoning_effort": effort, "mode": mode,
+            "task_supported": mode != "responses_direct"}
+
+
 def prune_result_cache(cache: Path, keep: Path) -> None:
     """Ограничить число и суммарный размер сохранённых RPC results.
 
@@ -201,11 +309,61 @@ def idempotency_database(state_dir: Path) -> sqlite3.Connection:
                 database.execute("ALTER TABLE jobs ADD COLUMN state TEXT NOT NULL DEFAULT 'unknown'")
             if "error_code" not in columns:
                 database.execute("ALTER TABLE jobs ADD COLUMN error_code TEXT")
+            if "updated_at" not in columns:
+                database.execute("ALTER TABLE jobs ADD COLUMN updated_at INTEGER")
     except Exception:
         database.close()
         raise
 
     return database
+
+
+def job_state(state_dir: Path, job_id: str, *, cancel: bool = False) -> dict:
+    """Прочитать состояние job либо атомарно запросить его отмену по UUID.
+
+    Параметры: state_dir — приватное состояние worker, job_id — канонический
+    UUID, cancel — запрос остановки. Возвращает безопасный статус с временами.
+    Отмена неизвестного UUID создаёт tombstone, не позволяющий позднему submit
+    запустить job. Активный Event отмечается только для этого state-dir/UUID;
+    cancelled выставляется исполнителем после cleanup. Старый running без
+    локального исполнителя возвращает unknown, не обещая остановку. Ошибки
+    SQLite/ФС и UUID передаются; команды/credentials/файлы результата не читаются.
+    """
+    if not isinstance(job_id, str) or str(uuid.UUID(job_id)) != job_id:
+        raise ValueError("invalid job identifier")
+    key = (str(state_dir.resolve()), job_id)
+    with _ACTIVE_LOCK, closing(idempotency_database(state_dir)) as database:
+        row = database.execute(
+            "SELECT state,created_at,updated_at,error_code FROM jobs WHERE job_id=?", (job_id,),
+        ).fetchone()
+        active = _ACTIVE_JOBS.get(key)
+        if cancel and row is None:
+            database.execute(
+                "INSERT INTO jobs(job_id,digest,created_at,state,error_code,updated_at) "
+                "VALUES(?,'',unixepoch(),'cancelled','worker_cancelled',unixepoch())", (job_id,),
+            )
+            database.commit()
+        elif cancel and row[0] in {"running", "cancelling"} and active is not None:
+            database.execute(
+                "UPDATE jobs SET state='cancelling',updated_at=unixepoch() WHERE job_id=?", (job_id,),
+            )
+            database.commit()
+            active.set()
+        row = database.execute(
+            "SELECT state,created_at,updated_at,error_code FROM jobs WHERE job_id=?", (job_id,),
+        ).fetchone()
+        if row is None:
+            state, created, updated, error = "unknown", None, None, None
+        else:
+            state, created, updated, error = row
+            if state in {"running", "cancelling"} and active is None:
+                state = "unknown"
+            elif state == "succeeded":
+                state = "completed"
+            elif state not in JOB_STATES:
+                state = "unknown"
+        return {"job_id": job_id, "state": state, "created_at": created,
+                "updated_at": updated, "error_code": error}
 
 
 def run_request(body: bytes, state_dir: Path) -> dict:
@@ -230,55 +388,70 @@ def run_request(body: bytes, state_dir: Path) -> dict:
     with os.fdopen(descriptor, "a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         digest = hashlib.sha256(body).hexdigest()
+        active_key = (str(state_dir.resolve()), job_id)
         with closing(idempotency_database(state_dir)) as database:
-            row = database.execute(
-                "SELECT digest,state,error_code FROM jobs WHERE job_id=?", (job_id,),
-            ).fetchone()
-            if row is None:
+            with _ACTIVE_LOCK:
+                row = database.execute(
+                    "SELECT digest,state,error_code FROM jobs WHERE job_id=?", (job_id,),
+                ).fetchone()
+                if row is not None and row[1] == "cancelled" and row[0] == "":
+                    raise WorkerJobFailure("worker_cancelled")
+                if row is not None and row[0] != digest:
+                    raise ValueError("conflicting job replay")
+                if row is not None and row[1] in {"failed", "cancelled"}:
+                    raise WorkerJobFailure(row[2])
+                try:
+                    stored = json.loads(destination.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    if row is not None:
+                        raise ValueError("job result expired") from None
+                else:
+                    if stored["digest"] != digest:
+                        raise ValueError("conflicting cached result")
+                    return stored["result"]
+                request = Request.decode(spec["input"])
+                cancelled = threading.Event()
                 database.execute(
-                    "INSERT INTO jobs(job_id,digest,created_at,state) "
-                    "VALUES(?,?,unixepoch(),'running')",
+                    "INSERT INTO jobs(job_id,digest,created_at,state,updated_at) "
+                    "VALUES(?,?,unixepoch(),'running',unixepoch())",
                     (job_id, digest),
                 )
                 database.commit()
-            elif row[0] != digest:
-                raise ValueError("conflicting job replay")
-            elif row[1] == "failed":
-                # Повреждённый/неизвестный код тоже fail-closed и не запускает job.
-                raise WorkerJobFailure(row[2])
-            try:
-                stored = json.loads(destination.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                if row is not None:
-                    # Retention может удалить файл между проверкой и чтением.
-                    raise ValueError("job result expired") from None
-            else:
-                if stored["digest"] != digest:
-                    raise ValueError("conflicting cached result")
-                return stored["result"]
-            request = Request.decode(spec["input"])
+                _ACTIVE_JOBS[active_key] = cancelled
             temporary = None
             try:
-                result = execute(request, state_dir, job_id=job_id)
-                with NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache, delete=False) as stream:
-                    temporary = Path(stream.name)
-                    json.dump({"digest": digest, "result": result}, stream)
-                temporary.replace(destination)
-                database.execute(
-                    "UPDATE jobs SET state='succeeded',error_code=NULL WHERE job_id=?", (job_id,),
-                )
-                database.commit()
+                with cancellation_scope(cancelled):
+                    result = execute(request, state_dir, job_id=job_id)
+                    check_cancellation()
+                    with NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache, delete=False) as stream:
+                        temporary = Path(stream.name)
+                        json.dump({"digest": digest, "result": result}, stream)
+                    with _ACTIVE_LOCK:
+                        check_cancellation()
+                        temporary.replace(destination)
+                        database.execute(
+                            "UPDATE jobs SET state='succeeded',error_code=NULL,updated_at=unixepoch() WHERE job_id=?", (job_id,),
+                        )
+                        database.commit()
             except Exception as error:
                 error_code = (
+                    "worker_execution_failed" if isinstance(error, JobCleanupFailed)
+                    else
+                    "worker_cancelled" if isinstance(error, JobCancelled) or cancelled.is_set()
+                    else
                     "worker_timeout" if isinstance(error, (subprocess.TimeoutExpired, TimeoutError))
                     else "worker_execution_failed"
                 )
-                database.execute(
-                    "UPDATE jobs SET state='failed',error_code=? WHERE job_id=?", (error_code, job_id),
-                )
-                database.commit()
+                with _ACTIVE_LOCK:
+                    database.execute(
+                        "UPDATE jobs SET state=?,error_code=?,updated_at=unixepoch() WHERE job_id=?",
+                        ("cancelled" if error_code == "worker_cancelled" else "failed", error_code, job_id),
+                    )
+                    database.commit()
                 raise WorkerJobFailure(error_code) from None
             finally:
+                with _ACTIVE_LOCK:
+                    _ACTIVE_JOBS.pop(active_key, None)
                 if temporary is not None:
                     temporary.unlink(missing_ok=True)
             try:
@@ -290,6 +463,63 @@ def run_request(body: bytes, state_dir: Path) -> dict:
 
 
 class JobHandler(BaseHTTPRequestHandler):
+    def authorized(self) -> bool:
+        """Проверить bearer управляющего запроса и отправить 401 при несовпадении.
+
+        Возвращает bool; compare_digest не раскрывает правильный token. Не пишет
+        заголовки в журнал, читает ровно одну настройку worker. При успехе HTTP
+        ответ ещё не отправлен; ошибки socket/config передаются вызывающему.
+        """
+        supplied = self.headers.get("Authorization", "")
+        expected = "Bearer " + os.environ[TRANSPORT_KEY]
+        if not hmac.compare_digest(supplied.encode(), expected.encode()):
+            self.send_json(401, {"error": "unauthorized"})
+            return False
+        return True
+
+    def control(self, *, cancel: bool = False) -> None:
+        """Обработать короткое чтение статуса/возможностей либо отмену одного UUID.
+
+        Параметр cancel выбирает POST cancel; GET допускает также capabilities.
+        Ответ 200 содержит только безопасный allowlist JSON, 401/404/422/503 —
+        фиксированную ошибку. Метод не занимает job semaphore, поэтому /stop и
+        /status доступны при полной загрузке. Управление чужим worker невозможно
+        без его отдельного transport token; данные prompt/result не возвращаются.
+        """
+        if not self.authorized():
+            return
+        try:
+            self.connection.settimeout(20)
+            if self.headers.get("Transfer-Encoding") or int(self.headers.get("Content-Length", "0")) != 0:
+                raise ValueError("unexpected control body")
+            if not cancel and self.path == JOB_PATH + "/capabilities":
+                self.send_json(200, effective_capabilities())
+                return
+            prefix = JOB_PATH + "/"
+            suffix = "/cancel" if cancel else ""
+            if not self.path.startswith(prefix) or (cancel and not self.path.endswith(suffix)):
+                self.send_json(404, {"error": "unknown path"})
+                return
+            identifier = self.path[len(prefix):-len(suffix)] if cancel else self.path[len(prefix):]
+            if not identifier or "/" in identifier:
+                self.send_json(404, {"error": "unknown path"})
+                return
+            result = job_state(Path(os.environ["STATE_DIRECTORY"]), identifier, cancel=cancel)
+            self.send_json(200, result)
+        except (ValueError, TypeError, KeyError):
+            self.send_json(422, {"error": "invalid control request"})
+        except Exception:
+            self.send_json(503, {"error": "worker control failed"})
+
+    def do_GET(self) -> None:
+        """Обслужить только аутентифицированные GET status/capabilities worker.
+
+        Не принимает параметров; делегирует ограниченную обработку control.
+        Не запускает модель, не занимает job slot и не выдаёт данные запроса.
+        Ошибки записи socket могут быть переданы базовому HTTP server.
+        """
+        self.control()
+
     def log_message(self, format, *args):
         # HTTP URLs, headers, and client-supplied data are never logged.
         """Отключить стандартный HTTP-журнал, способный раскрыть URL и пользовательские данные.
@@ -325,13 +555,13 @@ class JobHandler(BaseHTTPRequestHandler):
         Побочные эффекты: Проверяет path/token/length, захватывает semaphore, читает body, запускает run_request, пишет ответ и освобождает slot.
         Безопасность: Bearer сравнивается compare_digest; body ограничен до чтения, concurrency fail-fast, журнал содержит только тип и безопасную Codex category."""
         acquired = False
+        if self.path.startswith(JOB_PATH + "/"):
+            self.control(cancel=True)
+            return
         if self.path != JOB_PATH:
             self.send_json(404, {"error": "unknown path"})
             return
-        supplied = self.headers.get("Authorization", "")
-        expected = "Bearer " + os.environ[TRANSPORT_KEY]
-        if not hmac.compare_digest(supplied.encode(), expected.encode()):
-            self.send_json(401, {"error": "unauthorized"})
+        if not self.authorized():
             return
         try:
             self.connection.settimeout(20)

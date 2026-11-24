@@ -122,6 +122,10 @@ case $1 in
             PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
             /usr/local/bin/codex login --device-auth
         ;;
+    smoke-controls)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/smoke_test_commands.py"
+        ;;
     smoke-api)
         export PYTHONPATH=/opt/messenger-worksheets/app
         exec "${python}" "${admin}/smoke_test_worker.py" \

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -20,6 +22,70 @@ TRANSPORT_ENV = (
     "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
     "https_proxy", "http_proxy", "all_proxy", "no_proxy",
 )
+_CANCELLATION = threading.local()
+
+
+class JobCancelled(RuntimeError):
+    """Сообщить об отмене конкретного job без исходного текста и диагностики."""
+
+
+class JobCleanupFailed(RuntimeError):
+    """Не подтверждать остановку, если изолированный supervisor не убрал потомков."""
+
+
+@contextmanager
+def cancellation_scope(event: threading.Event):
+    """Привязать отмену к исполняющему потоку одного job и восстановить прежний контекст.
+
+    Параметр event создаёт RPC-слой отдельно для каждого UUID. Контекст не
+    наследуется другим job и не останавливает весь worker. При выходе прежнее
+    значение восстанавливается даже после исключения; ФС и сеть не используются.
+    """
+    previous = getattr(_CANCELLATION, "event", None)
+    _CANCELLATION.event = event
+    try:
+        check_cancellation()
+        yield
+    finally:
+        _CANCELLATION.event = previous
+
+
+def check_cancellation() -> None:
+    """Выбросить безопасный JobCancelled, если текущий job был отменён.
+
+    Не принимает параметров и ничего не возвращает. Читает только Event
+    текущего потока; не влияет на параллельные запросы и не выполняет ввод-вывод.
+    """
+    event = getattr(_CANCELLATION, "event", None)
+    if event is not None and event.is_set():
+        raise JobCancelled("worker_cancelled")
+
+
+def communicate_job(process, data, *, timeout: float):
+    """Обменяться данными с процессом с общим deadline и проверками отмены job.
+
+    Параметры: process — Popen; data — однократно передаваемые stdin bytes/str;
+    timeout — оставшийся общий бюджет. Возвращает пару stdout/stderr. Без
+    cancellation scope сохраняет обычную семантику communicate. В scope проверяет
+    отмену не реже 200 мс; при отмене выбрасывает JobCancelled, при deadline —
+    TimeoutExpired. Убийство и сбор процесса обязан выполнить вызывающий finally.
+    """
+    event = getattr(_CANCELLATION, "event", None)
+    if event is None:
+        return process.communicate(data, timeout=timeout)
+    deadline = time.monotonic() + timeout
+    incoming = data
+    while True:
+        check_cancellation()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        try:
+            result = process.communicate(incoming, timeout=min(0.2, remaining))
+            check_cancellation()
+            return result
+        except subprocess.TimeoutExpired:
+            incoming = None
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -75,6 +141,7 @@ def post_model_response(request: Request, *, timeout: float, max_bytes: int) -> 
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise subprocess.TimeoutExpired(argv, timeout)
+    check_cancellation()
     process = subprocess.Popen(
         argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         env=environment, start_new_session=True,
@@ -83,7 +150,7 @@ def post_model_response(request: Request, *, timeout: float, max_bytes: int) -> 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(argv, timeout)
-        output, _ = process.communicate(payload, timeout=remaining)
+        output, _ = communicate_job(process, payload, timeout=remaining)
     finally:
         try:
             os.killpg(process.pid, signal.SIGKILL)

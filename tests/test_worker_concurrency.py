@@ -114,12 +114,13 @@ class WorkerConcurrencyTest(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(results[0], results[1])
 
-    def test_codex_process_uses_new_session_and_cleans_process_group(self):
-        """Проверяет отдельную process group и cleanup после обычного turn."""
+    def test_codex_process_uses_private_subreaper_supervisor(self):
+        """Проверяет отдельную сессию supervisor и сохранение native argv/stdin/output."""
         process = Mock()
         process.pid = 4321
         process.args = ["/usr/local/bin/codex", "exec"]
         process.returncode = 0
+        process.poll.return_value = 0
         process.communicate.return_value = ("stdout", "stderr")
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(codex_worker.subprocess, "Popen", return_value=process) as popen, \
@@ -132,13 +133,12 @@ class WorkerConcurrencyTest(unittest.TestCase):
                 timeout=10,
             )
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        self.assertEqual(
-            killpg.call_args_list,
-            [
-                call(4321, codex_worker.signal.SIGTERM),
-                call(4321, codex_worker.signal.SIGKILL),
-            ],
-        )
+        killpg.assert_not_called()
+        wrapper = popen.call_args.args[0]
+        self.assertEqual(wrapper[1], "-I")
+        self.assertTrue(wrapper[2].endswith("/process_supervisor.py"))
+        self.assertEqual(wrapper[3:], ["--", *process.args])
+        self.assertEqual(process.communicate.call_args_list[0].args, ("prompt",))
         self.assertEqual((result.stdout, result.stderr), ("stdout", "stderr"))
 
     def test_result_cache_prunes_old_entries_to_bounded_count(self):

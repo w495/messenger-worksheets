@@ -60,7 +60,7 @@ systemd-analyze verify \
     "${deployment_dir}/worksheet-gateway-bot.service"
 # Production modules и units копируются root-owned, затем legacy aggregate
 # gateway выключается: одному chat никогда не должны владеть два polling writer.
-for module in bot_api.py bot_gateway.py codex_rpc.py codex_worker.py model_http.py personal_messenger.py worksheet.py; do
+for module in bot_api.py bot_gateway.py codex_rpc.py codex_worker.py model_http.py personal_messenger.py worksheet.py thread_context.py chat_commands.py request_options.py process_supervisor.py; do
     install -m 0644 -o root -g root \
         "${repo_root}/messenger-worksheets/messenger_worksheets/${module}" \
         "/opt/messenger-worksheets/app/messenger_worksheets/${module}"
@@ -100,7 +100,7 @@ systemctl daemon-reload
 systemctl disable --now worksheet-gateway.service
 
 install -d -m 0755 -o root -g root /opt/messenger-worksheets/admin
-for script in check_bot.py check_messenger.py diagnose_openai.py doctor_openai.py login_codex.py smoke_test_worker.py; do
+for script in check_bot.py check_messenger.py diagnose_openai.py doctor_openai.py login_codex.py smoke_test_worker.py smoke_test_commands.py; do
     install -m 0755 -o root -g root "${deployment_dir}/${script}" \
         "/opt/messenger-worksheets/admin/${script}"
 done
@@ -120,7 +120,7 @@ for operation in status check-messenger-api check-messenger-local check-bot \
     check-messenger-api-cleanroom check-messenger-local-cleanroom \
     check-tls-isolation \
     diagnose-openai doctor-openai login-codex smoke-api smoke-local set-native-codex \
-    login-sandbox-admin smoke-sandbox smoke-sandbox-task smoke-sandbox-link \
+    login-sandbox-admin smoke-sandbox smoke-sandbox-task smoke-sandbox-link smoke-controls \
     set-profile-gpt-5.3-codex-high \
     start-worker-api restart-worker-api stop-worker-api \
     start-worker-local restart-worker-local stop-worker-local \
