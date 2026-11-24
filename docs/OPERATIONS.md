@@ -1,8 +1,12 @@
 # Установка и эксплуатация
 
-## 1. Предварительная проверка
+Команды ниже рассчитаны на два пользовательских чата: API и Local.
+API-чат использует Responses API для обычного текста. Все задачи API-чата
+и запросы Local-чата обслуживает Codex CLI в sandbox-worker.
 
-На целевой ВМ должны выполняться команды:
+## Подготовка VM
+
+Нужны Python 3.14, systemd, OpenSSL, rsync, curl и установленный Codex CLI.
 
 ```bash
 python3 --version
@@ -12,271 +16,242 @@ systemctl --version
 openssl version
 ```
 
-Если `ensurepip` недоступен:
+Если Python сообщает, что `ensurepip` недоступен:
 
 ```bash
 sudo apt install python3.14-venv
 ```
 
-Установщик проверяет это до запроса секретов. Если от предыдущего запуска
-осталось неполное виртуальное окружение без `pip`, установщик восстанавливает
-его через `python -m ensurepip --upgrade`.
+Установщики используют учётную запись `w495` и читают модель из
+`/home/w495/.codex/config.toml`. Перед установкой проверьте в этом файле
+`model` и `model_reasoning_effort`. Для другого Linux-пользователя
+понадобится изменить скрипты и unit-файлы.
 
-## 2. Установка
+Зависимости закреплены в `messenger-worksheets/requirements.lock`.
+Он рассчитан на Python 3.14 и Linux x86_64 с поддержкой manylinux_2_28.
+
+## Первая установка
 
 ```bash
-cd /home/w495/messenger-worksheets-install
+git clone https://github.com/w495/messenger-worksheets.git messenger-worksheets-install
+cd messenger-worksheets-install
 sudo bash deployment/install.sh
 ```
 
-Установщик скрыто запросит:
+Установщик запросит OAuth пользовательского аккаунта Мессенджера и
+OpenAI API key. Ввод скрыт. Сервисы на этом шаге не запускаются.
 
-1. OAuth личного аккаунта Яндекс Мессенджера;
-2. OpenAI API key.
-
-Значения не должны передаваться в чат, аргументах команд или логах. После
-успешной установки ожидается:
-
-```text
-Installation prepared. Services were not enabled or started.
-```
-
-Для безопасной замены только OAuth Мессенджера используйте:
+Создайте локальную конфигурацию:
 
 ```bash
-sudo /opt/messenger-worksheets/venv/bin/python \
-  deployment/update_messenger_oauth.py --config deployment/instances.local.json
+cp deployment/instances.example.json deployment/instances.local.json
+chmod 600 deployment/instances.local.json
 ```
 
-Updater сначала проверяет `account=personal` и точный `expected_email`; при
-несовпадении env-файлы не изменяются.
+Заполните её в редакторе:
 
-## 3. Что создаётся
+- `expected_email` — email аккаунта, от имени которого сервис будет отвечать;
+- `messenger_backend` — `cleanroom`;
+- `instances.api.invite` — ссылка на API-чат;
+- `instances.local_user.invite` — ссылка на Local-чат;
+- `token_file` — абсолютный путь к OAuth-файлу с правами `0600`.
+  Если используется OAuth из первого установщика, удалите поле `token_file`.
 
-| Объект | Назначение |
-|---|---|
-| `/opt/messenger-worksheets/app` | общий код только для чтения |
-| `/opt/messenger-worksheets/messenger-client` | клиент, доступный шлюзу |
-| `/opt/messenger-worksheets/venv` | Python-зависимости |
-| `/etc/messenger-worksheets/gateway.env` | OAuth и RPC-настройки, mode `0600` |
-| `/etc/messenger-worksheets/worker.env` | OpenAI и RPC-настройки, mode `0600` |
-| `/var/lib/messenger-worksheets-gateway` | состояние шлюза |
-| `/var/lib/messenger-worksheets-worker` | состояние обработчика и Codex |
-
-## 4. Проверка после установки
-
-На время настройки можно установить root-owned helper с закрытым списком
-операций. Он не принимает произвольные команды или пути:
+Аккаунт должен состоять в обоих чатах и иметь права отправлять сообщения,
+вложения и реакции.
 
 ```bash
 sudo bash deployment/install_admin_helper.sh
 ```
 
-После завершения настройки доступ обязательно отзывается:
+Этот скрипт проверяет аккаунт и ссылки на чаты, создаёт отдельные конфигурации,
+обновляет код и устанавливает `worksheet-admin`.
+
+`worksheet-admin` разрешает пользователю `w495` фиксированный набор
+административных команд без пароля. Произвольные команды и пути он не принимает.
+Доступ сохраняется, пока оператор явно его не отзовёт.
+
+## Авторизация и запуск
+
+Авторизуйте Codex под системным пользователем sandbox-worker:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin login-sandbox-admin
+```
+
+Затем запустите обработчики и выполните проверки:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin start-worker-api
+sudo -n /usr/local/sbin/worksheet-admin start-worker-sandbox
+sudo -n /usr/local/sbin/worksheet-admin check-messenger-api-cleanroom
+sudo -n /usr/local/sbin/worksheet-admin check-messenger-local-cleanroom
+sudo -n /usr/local/sbin/worksheet-admin smoke-api
+sudo -n /usr/local/sbin/worksheet-admin smoke-sandbox-task
+sudo -n /usr/local/sbin/worksheet-admin smoke-sandbox-link
+```
+
+Последние три команды проверяют текстовый API-ответ, создание `hello.txt`
+и скачивание example.com. Проверка ссылки сравнивает возвращённый файл
+с независимо полученным HTTP-ответом.
+
+После успешных проверок запустите шлюзы:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin start-gateway-api
+sudo -n /usr/local/sbin/worksheet-admin start-gateway-sandbox
+sudo -n /usr/local/sbin/worksheet-admin status
+```
+
+Отправьте в каждый чат:
+
+```text
+/task Создай файл check.txt с текстом OK и пришли его в чат.
+```
+
+Должны появиться файл, статус `✅ Готово.` и реакция ✅.
+Для проверки изображений попросите создать PNG: он должен прийти картинкой
+и отдельным документом.
+
+Автозапуск включается для этих четырёх служб:
+
+```bash
+sudo systemctl enable worksheet-worker.service worksheet-worker-sandbox-admin.service \
+  worksheet-gateway-api.service worksheet-gateway-sandbox-admin.service
+```
+
+## Службы и каталоги
+
+| Служба | Назначение | Порт |
+|---|---|---|
+| `worksheet-worker.service` | Responses API для текста API-чата | 8443 |
+| `worksheet-worker-sandbox-admin.service` | Codex CLI для задач обоих чатов и текста Local-чата | 8445 |
+| `worksheet-gateway-api.service` | Приём и отправка сообщений API-чата | — |
+| `worksheet-gateway-sandbox-admin.service` | Приём и отправка сообщений Local-чата | — |
+
+`worksheet-worker-local-user.service` на порту 8444 — отдельный резервный
+режим запуска Codex с правами `w495`. Это не активный обработчик Local-чата.
+Общий старый шлюз и Team Bot API в этой схеме выключены.
+
+| Каталог | Содержимое |
+|---|---|
+| `/opt/messenger-worksheets/app` | Установленный код |
+| `/opt/messenger-worksheets/venv` | Python-зависимости |
+| `/etc/messenger-worksheets` | Конфигурации и TLS-ключи |
+| `/var/lib/messenger-worksheets-worker` | Состояние API-worker |
+| `/var/lib/messenger-worksheets-chat-admin` | Codex-авторизация и задачи sandbox-worker |
+| `/var/lib/messenger-worksheets-gateway-api` | Состояние API-шлюза |
+| `/var/lib/messenger-worksheets-gateway-sandbox-admin` | Состояние Local-шлюза |
+
+OAuth Мессенджера доступен шлюзам, OpenAI API key — API-worker.
+У каждого worker-профиля отдельные TLS-ключи, доверенный CA и RPC-токен.
+
+## Работа в чатах
+
+`/task`, HTTP(S)-ссылка или распознанное поручение направляет сообщение
+в режим задач. Ссылку загружает worker своими инструментами. Содержимое страницы
+не может менять его правила или давать дополнительные права.
+
+Результаты отправляются в тред исходного сообщения. Индикатор выполнения
+редактируется в одном сообщении. Реакции: 👀 — обработка, ✅ — успех,
+💔 — ошибка задачи или доставки.
+
+Нативный PNG может быть перекодирован Мессенджером. Копия PNG, отправленная
+документом, сохраняет исходные байты. Поэтому изображения отправляются
+двумя сообщениями.
+
+Входящие документы пока не передаются worker. Для текстового задания
+используйте текст сообщения или публичную ссылку. Входящие изображения
+поддерживаются.
+
+Задача ограничена 30 минутами, ответ с файлами — 50 МиБ. Worker выполняет
+до четырёх запросов одновременно; шлюз каждого чата обрабатывает сообщения
+последовательно. Все задачи sandbox-worker используют один системный аккаунт,
+его состояние и модельную квоту.
+
+Sandbox-worker работает с сетью и `danger-full-access` внутри ограничений
+systemd. Он не получает доступ к домашним каталогам, но может читать собственную
+Codex-авторизацию и данные других задач этого аккаунта.
+
+## Обновление
+
+Дождитесь завершения текущих задач. Остановите шлюзы, обновите исходники
+и установите их:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin stop-gateway-api
+sudo -n /usr/local/sbin/worksheet-admin stop-gateway-sandbox
+git pull --ff-only
+sudo bash deployment/install_admin_helper.sh
+sudo -n /usr/local/sbin/worksheet-admin restart-worker-api
+sudo -n /usr/local/sbin/worksheet-admin restart-worker-sandbox
+sudo -n /usr/local/sbin/worksheet-admin start-gateway-api
+sudo -n /usr/local/sbin/worksheet-admin start-gateway-sandbox
+sudo -n /usr/local/sbin/worksheet-admin status
+```
+
+Повторно запускать `install.sh` для обновления не нужно: он заново запрашивает
+и записывает секреты. Для обновления кода предназначен `install_admin_helper.sh`.
+
+Не удаляйте SQLite-файлы состояния при обычном обновлении или откате:
+это может вызвать повторную обработку сообщений.
+
+## Диагностика
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin logs-gateway-api
+sudo -n /usr/local/sbin/worksheet-admin logs-gateway-sandbox
+sudo -n /usr/local/sbin/worksheet-admin logs-worker-api
+sudo -n /usr/local/sbin/worksheet-admin logs-worker-sandbox
+```
+
+При HTTP 503 проверьте журнал соответствующего worker.
+`diagnose-openai` проверяет OpenAI API и доступность Codex CLI, выводя
+категории ошибок без ключей и сырых ответов:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin diagnose-openai
+```
+
+Если TLS-проверка не проходит:
+
+```bash
+sudo bash deployment/repair_tls.sh
+sudo -n /usr/local/sbin/worksheet-admin check-tls-isolation
+```
+
+Не публикуйте содержимое файлов окружения, OAuth-файлов и приватных TLS-ключей.
+
+## Остановка и отзыв административного доступа
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin stop-gateway-api
+sudo -n /usr/local/sbin/worksheet-admin stop-gateway-sandbox
+sudo -n /usr/local/sbin/worksheet-admin stop-worker-api
+sudo -n /usr/local/sbin/worksheet-admin stop-worker-sandbox
+```
+
+Состояние и секреты при остановке сохраняются.
+
+Если оператор решил удалить административный helper:
 
 ```bash
 sudo -n /usr/local/sbin/worksheet-admin revoke
 ```
 
-### Два независимых instance
+Команда удалит sudoers-правило и helper. Для восстановления потребуется
+снова выполнить `sudo bash deployment/install_admin_helper.sh`.
 
-Отдельный worker `worksheet-worker-local-user.service` запускает Codex от имени
-`w495` и использует его официальную авторизацию. Из
-`/home/w495/.codex/config.toml` при provisioning копируются только `model` и
-`model_reasoning_effort`; Codex стартует с `--ignore-user-config`. API key,
-MCP, hooks и остальные пользовательские настройки не наследуются.
+## Совместимость со старым клиентом
 
-Режим менее изолирован: worker получает права `w495`, доступ к его home,
-собственному TLS key и transport token процесса. Gateway по-прежнему работает
-под отдельным `worksheet-gateway`.
-
-Оба instance могут работать одновременно:
-
-```bash
-sudo -n /usr/local/sbin/worksheet-admin start-api-instance
-sudo -n /usr/local/sbin/worksheet-admin start-local-instance
-```
-
-API instance использует порт `8443` и `gateway-api.env`; local-user instance —
-порт `8444` и `gateway-local-user.env`. StateDirectory и RPC token раздельные.
-API instance использует text-only direct Responses adapter (`store=false`,
-локальная bounded history, без Codex tools и файловых задач).
-Task-запросы API-чата маршрутизируются в отдельный sandbox-admin worker, поэтому
-команды и файлы доступны без передачи API key этому worker.
-Статусы, ответы и artifacts обоих gateway отправляются в тред исходного
-сообщения; запросы внутри существующего треда остаются в нём.
-Для task-запроса создаётся одно редактируемое progress-сообщение со spinner
-случайного стиля (BSD, Braille, стрелка, заполнение, ASCII-точки,
-пинг-понг, часы, цветные круги, цветные/монохромные квадраты, emoji-стрелки
-или emoji-циферблат). Кадры обновляются каждые 100 ms и выводятся без
-квадратных скобок. Выбранный стиль сохраняется на весь task; после доставки
-результата сообщение становится `✅ Готово.`
-На исходное пользовательское сообщение ставится реакция 👀 при начале обработки;
-после доставки результата она заменяется на ✅.
-При ошибке задачи или доставки вложений 👀 заменяется на 💔, а progress
-завершается текстом `❌ Ошибка.`.
-В local-user instance task-режим и image generation разрешены любому участнику
-чата; это даёт всем участникам возможность расходовать модельную квоту.
-
-Сообщение с HTTP(S)-ссылкой, в том числе raw GitHub/Gist, автоматически получает
-task-маршрут. В действующих API и Local чатах этот маршрут ведёт в sandbox-admin
-с внешней сетью и shell-инструментами. Worker должен сначала прочитать точный URL
-и затем выполнить исходное поручение; страницы и файлы по ссылкам не меняют
-его правила и полномочия. Ошибка загрузки сообщается явно. Другие offline
-профили не получают обещания сетевого доступа.
-
-### Sandbox-admin для всех участников
-
-`worksheet-worker-sandbox-admin.service` работает под отдельным системным
-пользователем `worksheet-chat-admin` на порту `8445`. Full Codex toolset
-доступен task-запросам любого участника в режиме `danger-full-access` внутри
-внешней systemd-границы. `/home/w495`, его токены, SSH и MCP не доступны.
-Task-команды имеют внешний network access; это явно разрешено для всех
-участников. Они также могут читать state/auth пользователя `worksheet-chat-admin`,
-что увеличивает риск эксфильтрации данных этого отдельного аккаунта.
-
-Task execution timeout составляет 1800 секунд, RPC timeout — 1860 секунд.
-Worker обслуживает до четырёх jobs одновременно через bounded threaded HTTP
-server; пятый одновременный запрос получает HTTP 429. Это не даёт задачам из
-двух чатов блокировать друг друга на весь timeout.
-
-После установки проверить реальное скачивание через worker можно командой:
-
-```bash
-sudo -n /usr/local/sbin/worksheet-admin smoke-sandbox-link
-```
-
-Probe просит worker скачать example.com в файл и побайтно сравнивает результат
-с независимым HTTPS GET. Ожидается `worker_external_link_smoke_test_ok bytes_match=yes`.
-
-### Clean-room Messenger backend
-
-`messenger_user_client` реализован независимо и устанавливается рядом с
-временным legacy-клиентом. Перед переключением каждого production chat helper
-выполняет read-only identity и future-history probe фактическим clean-room
-backend. Не запускайте legacy и clean-room gateway одновременно для одного
-chat: rollback меняет backend в существующем unit и сохраняет актуальный
-SQLite cursor/idempotency state.
-
-Сначала проверьте оба маршрута без записи:
-
-```bash
-sudo -n /usr/local/sbin/worksheet-admin check-messenger-api-cleanroom
-sudo -n /usr/local/sbin/worksheet-admin check-messenger-local-cleanroom
-```
-
-Переключайте по одному gateway, начиная с API-чата. После каждого шага проверьте
-text/thread/reactions/document и двойную доставку PNG (image + document):
+Основной клиент выбирается настройкой `messenger_backend=cleanroom`.
+Переключение уже установленного шлюза:
 
 ```bash
 sudo -n /usr/local/sbin/worksheet-admin activate-cleanroom-api
 sudo -n /usr/local/sbin/worksheet-admin activate-cleanroom-sandbox
 ```
 
-Немедленный rollback не восстанавливает старую копию SQLite — это намеренно,
-иначе cursor откатится и сообщения могут быть отправлены повторно:
-
-```bash
-sudo -n /usr/local/sbin/worksheet-admin rollback-legacy-api
-sudo -n /usr/local/sbin/worksheet-admin rollback-legacy-sandbox
-```
-
-Экспериментальные Team Bot API modules и unit остаются disabled и не входят в
-текущую production-архитектуру.
-
-Media upload и download используют namespace file IDs с безопасными slash-
-сегментами. `FileInfo.Source` всегда integer `0`. Нативный PNG загружается как
-`image/png` и может быть перекодирован Мессенджером; проверяются его размеры и
-пиксели. Document загружается как `application/octet-stream`, включая PNG,
-чтобы скачиваемая копия сохраняла исходные bytes. Проверка document — SHA-256
-скачанного вложения. Оба вида доставки должны быть отдельными сообщениями.
-
-Перед первым запуском выполните официальный device login:
-
-```bash
-sudo -n /usr/local/sbin/worksheet-admin login-sandbox-admin
-```
-
-После успешного smoke-test переключение и откат выполняются атомарно:
-
-```bash
-sudo -n /usr/local/sbin/worksheet-admin activate-sandbox
-sudo -n /usr/local/sbin/worksheet-admin rollback-local
-```
-
-Не запускайте шлюз до проверки личности аккаунта. Сначала проверьте, что units
-загрузились и обработчик стартует:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl start worksheet-worker.service
-sudo systemctl status --no-pager worksheet-worker.service
-```
-
-Диагностика без вывода секретов:
-
-```bash
-sudo journalctl -u worksheet-worker.service -n 100 --no-pager
-sudo systemctl show worksheet-worker.service -p ActiveState -p SubState
-```
-
-Затем выполните один реальный запрос через локальный TLS RPC. Скрипт читает
-root-only конфигурацию, но не печатает секреты:
-
-```bash
-cd /home/w495/messenger-worksheets-install
-sudo PYTHONPATH=/opt/messenger-worksheets/app \
-  /opt/messenger-worksheets/venv/bin/python deployment/smoke_test_worker.py
-```
-
-Ожидаемый префикс результата — `worker_smoke_test_ok`.
-
-При `HTTP 503` от smoke-test выполните безопасную диагностику API и Codex CLI.
-Она не печатает ключ, HTTP-body или сырой stderr:
-
-```bash
-sudo /opt/messenger-worksheets/venv/bin/python deployment/diagnose_openai.py
-```
-
-Если API отвечает `200`, а Codex сообщает `login_required` или
-`authentication`, выполните официальный вход с API key под изолированным
-пользователем. Helper читает ключ из root-only файла и передаёт его Codex через
-stdin, не аргументом команды:
-
-```bash
-sudo /opt/messenger-worksheets/venv/bin/python deployment/login_codex.py
-```
-
-Если Python сообщает `CA cert does not include key usage extension`, обновите
-checkout и один раз восстановите локальную TLS-цепочку без изменения секретов:
-
-```bash
-sudo bash deployment/repair_tls.sh
-```
-
-Шлюз запускается только после read-only проверки OAuth и отдельного разрешения
-на отправку пробного сообщения:
-
-```bash
-sudo systemctl start worksheet-gateway.service
-```
-
-Автозапуск включается после успешной end-to-end проверки:
-
-```bash
-sudo systemctl enable worksheet-worker.service worksheet-gateway.service
-```
-
-## 5. Остановка
-
-```bash
-sudo systemctl stop worksheet-gateway.service worksheet-worker.service
-```
-
-Остановка не удаляет состояние, секреты или сертификаты.
-
-## 6. Обновление
-
-Перед обновлением остановите шлюз и обработчик, обновите checkout и повторно
-запустите установщик. Он обновит код и зависимости, но не стартует службы сам.
-После этого повторите проверки раздела 4.
+Режим `legacy` требует отдельно установленного старого клиента.
+Команды `rollback-legacy-api` и `rollback-legacy-sandbox` сначала проверяют
+его наличие и аккаунт. Если проверка не проходит, работающий шлюз не меняется.

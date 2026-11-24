@@ -1,311 +1,238 @@
-# Clean-room спецификация Messenger user client
+# Пользовательский клиент Мессенджера: API и протокол
 
-## Изоляция реализации
+Модуль `messenger_user_client` работает с Registry по HTTPS и Fanout по
+WebSocket. В нём нет CLI, запуска команд и хранения OAuth-токена на диске.
+Gateway передаёт токен при создании клиента.
 
-Реализация создаётся независимо. Разработчику запрещено читать, импортировать,
-сравнивать или копировать legacy-каталог ``messenger-client``, локально
-установленные прежние клиенты и любые другие реализации ``MessengerUserClient``.
+Первоначальная реализация была написана отдельно от старого клиента по
+описанию протокола и ответам тестового аккаунта. Этот документ описывает
+текущий интерфейс и поля, важные для совместимости.
 
-Разрешённые источники: эта спецификация, официальные HTTPS endpoint, ответы
-выделенного тестового аккаунта и создаваемые в clean-room тесты.
+## Подключение
 
-## Цель
+```python
+from messenger_user_client import MessengerUserClient
 
-Создать Python 3.11+ пакет без CLI, который предоставляет минимальный
-user-authorized adapter для `messenger-worksheets`. Код и комментарии —
-самостоятельные. Комментарии и docstring на русском обязательны для публичных
-API, wire-формата, проверки identity, файловой безопасности и retry semantics.
-Очевидные строки комментировать не требуется.
-
-## Публичный интерфейс `client.py`
-
-Экспортировать:
-
-- `MessengerError`, `AuthenticationError`, `PermissionDenied`,
-  `ConfirmationError`, `OperationUncertain`;
-- `MessengerUserClient`;
-- `render_message(raw) -> dict`;
-- `thread_chat_id(parent_chat_id, timestamp) -> str`.
-
-Конструктор клиента:
-
-```text
-MessengerUserClient(
+client = MessengerUserClient(
     token,
-    account="work" | "personal",
-    environment="prod" | "alpha",
-    expected_login=None,
-    expected_email=None,
-    expected_uid=None,
-    expected_organization_id=None,
-    enforce_account_class=True,
-    timeout=30,
+    account="personal",
+    expected_email="user@example.test",
+    timeout=12,
+)
+identity = client.identity()
+```
+
+Конструктор также принимает `environment` (`prod` или `alpha`),
+`expected_login`, `expected_uid`, `expected_organization_id` и
+`enforce_account_class`.
+
+`identity()` получает UID и GUID с сервера, затем сверяет заданные ожидания.
+Email проверяется по ответу и контактам пользователя; он не строится из логина.
+Если проверка не пройдена, последующие операции не выполняются.
+
+По умолчанию `account="work"` требует организационный аккаунт, а
+`account="personal"` — аккаунт без организации. Gateway использует
+`enforce_account_class=False`, поскольку членство в организации само по себе
+не определяет нужную учётную запись. Проверка `expected_email` при этом сохраняется.
+
+Ошибки: `MessengerError`, `AuthenticationError`, `PermissionDenied`,
+`ConfirmationError`, `OperationUncertain`. В сообщениях ошибок нет OAuth
+и тела удалённого ответа.
+
+## Чтение
+
+| Метод | Результат |
+|---|---|
+| `identity(refresh=False)` | UID, GUID, логин, email и сведения об организации |
+| `resolve_invite(invite)` | `invite_hash`, `found`, `chat` |
+| `read_history(chat_id, limit=30, before_ts=None)` | `chat_id`, `messages`, `count`, `next_before_ts` |
+| `fanout(path, payload)` | Ответ разрешённой операции `history` или `message_info` |
+
+`resolve_invite` принимает hash либо HTTPS-ссылку. В ссылке вида
+`https://messenger.360.yandex.ru/#/join/<hash>` hash находится после `#`.
+
+История принимается только для точного запрошенного `ChatId`.
+`render_message(raw)` возвращает `ts`, `seq`, `version`, автора,
+`author_guid`, `text`, `payload_id`, `deleted` и метаданные вложений.
+Неизвестное содержимое помечается `unknown_content`; произвольные поля
+ответа не копируются.
+
+Тред чата `n/k/id` имеет ID `(n+100)/k/id_<parent_timestamp>`.
+Его строит `thread_chat_id(parent_chat_id, timestamp)`.
+
+## Запись и подтверждение
+
+Методы записи вызываются дважды:
+
+1. Вызов без `confirm_fingerprint` возвращает
+   `status="preview_not_applied"` и SHA-256 `fingerprint`. Запись не выполняется.
+2. Повторный вызов с теми же параметрами и этим fingerprint выполняет операцию.
+
+Fingerprint связывает пользователя, окружение, вид операции и точные параметры.
+Проверка выполняется через `hmac.compare_digest`. OAuth в fingerprint не входит.
+
+```python
+preview = client.send_message("Ответ", chat_id=chat_id)
+result = client.send_message(
+    "Ответ",
+    chat_id=chat_id,
+    payload_id=preview["payload_id"],
+    confirm_fingerprint=preview["fingerprint"],
 )
 ```
 
-Нужные методы:
+Интерфейс методов:
 
-- `identity(refresh=False)`;
-- `resolve_invite(invite)`;
-- `fanout(path, payload)`;
-- `read_history(chat_id, limit=30, before_ts=None)`;
-- `send_message(text, chat_id, thread_ts=None, payload_id=None,
-  confirm_fingerprint=None)`;
-- `edit_message(chat_id, timestamp, text, confirm_fingerprint=None)`;
-- `set_reaction(chat_id, timestamp, reaction, operation="add",
-  confirm_fingerprint=None)`;
-- `send_document(chat_id, path, story_id, payload_id=None,
-  confirm_fingerprint=None, receipt_dir=None)`;
-- `send_image_with_caption(chat_id, path, text, story_id, payload_id=None,
-  confirm_fingerprint=None, receipt_dir=None)`;
-- `download_media(file_id, target, max_bytes,
-  confirm_fingerprint=None)`.
-
-Все мутации двухфазны: первый вызов возвращает `preview_not_applied` и
-SHA-256 fingerprint; второй выполняется только с точным fingerprint.
-
-## Registry HTTPS
-
-Контуры:
-
-- prod: `https://messenger.360.yandex.ru/api/`;
-- alpha: `https://api.messenger.alpha.yandex.ru/api/`.
-
-POST form-urlencoded поле `request`, содержащее compact JSON:
-
-```json
-{"method":"<method>","params":{}}
+```text
+send_message(text, chat_id, thread_ts=None, payload_id=None, confirm_fingerprint=None)
+edit_message(chat_id, timestamp, text, confirm_fingerprint=None)
+set_reaction(chat_id, timestamp, reaction, operation="add", confirm_fingerprint=None)
+send_document(chat_id, path, story_id, payload_id=None,
+              confirm_fingerprint=None, receipt_dir=None)
+send_image_with_caption(chat_id, path, text, story_id, payload_id=None,
+                        confirm_fingerprint=None, receipt_dir=None)
+download_media(file_id, target, max_bytes, confirm_fingerprint=None)
 ```
 
-Заголовки: OAuth token, `X-Application-Id: Yamb-web`, JSON accept.
-Разрешить только фиксированный allowlist методов. Для текущего проекта нужны
-`request_user`, `get_chats_info` и read-only вспомогательные методы,
-необходимые для identity/invite. Ответ имеет `status` и `data`.
+Edit перечитывает сообщение перед каждым вызовом, проверяет автора и использует
+исходный `PayloadId`. Новый UUID для редактирования создавать нельзя.
 
-Токен, `Authorization` и свободный error body никогда не логируются.
+Исход операции возвращается в `outcome`: `confirmed`, `rejected` или
+`unknown`. Потребители также принимают `duplicate` для совместимости.
+Числовые статусы успеха учитываются только в полях результата, а не в
+произвольных вложенных данных. Непустой `Details` означает отказ.
 
-## Fanout WebSocket
+`unknown` означает, что ответ не позволяет установить результат. Перед
+повтором нужно проверить историю по `payload_id`, автору и адресату.
+Транспорт сам не повторяет `push` после неизвестного исхода.
 
-Endpoint: `wss://push.yandex.ru/v2/subscribe/websocket`.
-Query содержит service (`messenger-prod:version5` или `messenger:version5`),
-client id реализации, параметр `user` со значением uid подтверждённой identity
-и случайный UUID session.
-OAuth передаётся только заголовком. TLS verification обязательна.
-WebSocket transport не отправляет browser `Origin` (`suppress_origin=true`).
-Ошибки handshake классифицируются только безопасной категорией (`http_NNN`,
-`timeout`, `tls`, `connection`) без response body, headers и OAuth.
+## Registry
 
-Управляющее текстовое JSON-сообщение использует поле `operation`. После
-`{"operation":"ping"}` или `{"operation":"subscribed"}` отправляется
-бинарный DATA frame:
+| Окружение | URL |
+|---|---|
+| prod | `https://messenger.360.yandex.ru/api/` |
+| alpha | `https://api.messenger.alpha.yandex.ru/api/` |
 
-1. байт `0x01`;
-2. msgpack-массив из трёх элементов: ноль, request id, строковый path;
-3. little-endian uint32 со значением 5;
-4. little-endian uint64, младшие 32 бита которого равны MurmurHash2 payload;
-5. compact UTF-8 JSON payload.
+Запрос — POST form-urlencoded с полем `request`:
 
-Ответ DATA начинается байтом 1 и содержит JSON-объект после служебного
-бинарного заголовка. Парсер ищет кандидаты `{` и принимает первый хвост,
-который полностью декодируется как JSON object.
+```json
+{"method":"request_user","params":{}}
+```
 
-Allowlist path для проекта: `history`, `message_info`, `push`.
-Read-only вызовы можно ограниченно повторять; `push` автоматически не
-повторяется после неизвестного исхода.
+Разрешены методы `request_user` и `get_chats_info`.
+Заголовки: `Authorization: OAuth <token>`, `X-Application-Id: Yamb-web`,
+`Accept: application/json`. Автоматические перенаправления запрещены.
 
-## Сообщения
+Ответ содержит `status` и `data`. Пользователь находится в `data.user`;
+организации могут быть в `user.organizations`, email — в `user.contacts`.
+Корпоративный суффикс `@yandex-team.ru` удаляется только из login/nickname;
+поле email сохраняется целиком.
 
-Нормализованный результат `render_message` содержит безопасные поля:
+## Fanout
 
-- `ts`, `seq`, `version`;
-- `author`, `author_guid`;
-- `text`, `payload_id`, `deleted`;
-- `media` для image/gallery/document;
-- `unknown_content=True`, если wire содержит нераспознанные данные.
+Адрес: `wss://push.yandex.ru/v2/subscribe/websocket`.
 
-Никогда не возвращать произвольные неизвестные wire-поля: они могут содержать
-URL или credentials.
+Параметры подключения: `service` (`messenger-prod:version5` для prod,
+`messenger:version5` для alpha), имя клиента, `user` с UID и случайный
+`session`. OAuth передаётся заголовком. TLS проверяется; `Origin` не отправляется.
 
-Тред группового чата `n/k/id` имеет id `(n+100)/k/id_<parent_timestamp>`.
+После текстового события `operation=ping` или `operation=subscribed`
+клиент отправляет бинарный DATA-кадр:
 
-Отправка текста использует `push` с Plain: целевой ChatId, Text.MessageText и
-UUID PayloadId. Редактирование обязано перечитать сообщение, убедиться, что
-оно своё, и повторно использовать исходный PayloadId вместе с Timestamp.
+1. Маркер `0x01`.
+2. Массив msgpack `[0, request_id, path]`.
+3. Версия протокола: uint32 little-endian со значением 5.
+4. Контрольная сумма: uint64 little-endian с MurmurHash2 JSON в младших 32 битах.
+5. Компактный JSON в UTF-8.
 
-Реакции проекта:
+JSON-ответ извлекается из DATA-кадра `0x01`. Короткий кадр `0x02`
+сам по себе не считается подтверждением записи. При отсутствии DATA-ответа
+ожидание завершается по timeout.
 
-- `✅` -> type `100101`;
-- `👀` -> type `100110`;
-- `💔` -> type `100116` (ошибка задачи или доставки);
-- actions add/remove/replace -> `0/1/2`.
+Разрешены `history`, `message_info` и внутренний `push`.
+Публичный `fanout("push", ...)` запрещён: запись доступна через методы
+с подтверждением fingerprint. Чтение повторяется один раз при транспортном сбое.
+
+### Поля запросов
+
+История: `ChatId`, `Limit`, необязательные `MinTimestamp` и
+`MaxTimestamp`. Ответ содержит `Chats[].Messages`.
+
+Одно сообщение: `ChatId`, `Timestamp`. В ответе сообщение может быть
+в `Message`, `ServerMessage` или `MessageInfo`.
+
+Текст отправляется в следующем конверте:
+
+```json
+{"ClientMessage":{"Plain":{"ChatId":"…","Text":{"MessageText":"…"},"PayloadId":"…"}},"UserIp":"::1"}
+```
+
+При редактировании в `Plain` добавляется `Timestamp`.
+Для реакции вместо `Plain` передаётся `Reaction` с полями
+`ChatId`, `Timestamp`, `Type` и `Action`.
+
+`Timestamp`, `Reaction.Type` и `Action` должны быть JSON-числами.
+Строковые значения этих полей сервер может отклонить кадром `0x02`.
+
+| Реакция | Type |
+|---|---|
+| ✅ | 100101 |
+| 👀 | 100110 |
+| 💔 | 100116 |
+
+`Action`: добавить — 0, удалить — 1, заменить — 2.
 
 ## Файлы и изображения
 
-- Только абсолютные локальные пути.
-- Запрет symlink во всех компонентах пути.
-- Только regular file, максимум 50 MiB.
-- Открытие через `O_NOFOLLOW`, сверка stat до/после чтения.
-- PNG: валидная signature/IHDR/CRC, разумные размеры, без APNG.
-- Upload только на фиксированный HTTPS media host, OAuth в заголовке,
-  redirects запрещены.
-- Перед upload и push записывается приватная receipt (`0700` directory,
-  `0600` file) для reconcile после unknown outcome.
-- Документ отправляется как MiscFile; PNG с caption — как Gallery.
-- Download создаёт новый файл через `O_EXCL|O_NOFOLLOW`, ограничивает размер,
-  удаляет partial file после ошибки. OAuth снимается перед разрешённым media
-  redirect; каждый redirect остаётся HTTPS и внутри `*.yandex.ru`/`*.yandex.net`.
-
-## Identity
-
-`request_user` обязан вернуть uid/guid. При заданных expectations проверяются
-точные email/uid/organization. `work` требует организационный аккаунт,
-`personal` — consumer account. Не строить email из nickname. При mismatch или
-unverified остановить чтение и запись fail-closed.
-
-## Security acceptance criteria
-
-- Нет секретов, OAuth client ID, реальных chat ID или PII в исходниках.
-- Нет `eval`, `exec`, subprocess/shell, pickle/yaml unsafe load.
-- Нет отключения TLS и автоматических redirect с OAuth.
-- URL/host/method/path/header/file inputs валидируются allowlist.
-- Ошибки не содержат response body и токен.
-- Preview fingerprint связывает actor, account, environment и точный request.
-- Сравнение fingerprints — constant-time.
-- Тесты покрывают token redaction, redirect, symlink/path traversal, size
-  limits, identity mismatch, unknown mutation outcome и wire frame fixtures.
-
-## Acceptance для интеграции
-
-Новый пакет должен пройти собственные unit-тесты, затем тестовый запуск на
-выделенном OAuth без изменения production state. После этого
-`messenger-worksheets` переключается импортом на новый пакет с возможностью
-немедленного rollback.
-
-## Точный compatibility contract для messenger-worksheets
-
-Эта секция задаёт только наблюдаемое поведение и wire shape, без исходного
-кода прежнего клиента.
-
-### Registry
-
-Invite разрешается методом `get_chats_info` с параметром `invite_hash`.
-Публичный результат:
+Upload выполняется POST-запросом на фиксированный адрес:
 
 ```text
-{"invite_hash": <str>, "found": <bool>, "chat": <dict|null>}
+https://files.messenger.yandex.ru/media_upload/<chat segments>/<payload UUID>/<filename>
 ```
 
-`identity()` возвращает как минимум `uid`, `guid`, `login`,
-`is_org_account`; expectations проверяются fail-closed.
+Сегменты пути кодируются отдельно. Тело запроса — байты файла, OAuth — в
+заголовке. Перенаправления запрещены. Ответ возвращает `file_id`.
 
-Фактический `request_user` содержит вложенный объект `user`. Организации могут
-быть списком в `user.organizations`; email может находиться в allowlisted
-`user.contacts` (`type=email`, `value=<address>`). Email нельзя строить из
-nickname. Для personal-account пустой список organizations означает
-`is_org_account=false`.
+Документы загружаются с `Content-Type: application/octet-stream`,
+PNG-картинки — с `image/png`. Мессенджер может перекодировать картинку;
+копия документа должна сохранять исходные байты.
 
-Для совместимости `login` нормализуется отдельно от email: значение вида
-`example-user@yandex-team.ru` в login/nickname превращается в короткий
-`example-user`, тогда
-как поле email сохраняет полный адрес. Другие домены самовольно не обрезаются.
+Документ передаётся как `Plain.MiscFile.FileInfo`:
+`Id2`, `Name`, `Size`, `Source=0`. Картинка — как
+`Plain.Gallery` с подписью `Text` и одним `Items[].Image`:
+`Width`, `Height`, `Animated=false`, `FileInfo`.
+`story_id` используется для локального учёта, а не как значение `Source`.
 
-Invite parser обязан поддерживать bare hash и URL вида
-`https://messenger.360.yandex.ru/#/join/<hash>`: hash в таком URL находится во
-fragment, а не path. Допустимые host проверяются allowlist.
-
-### Fanout payload
-
-Fanout `push` получает envelope:
-
-```json
-{"ClientMessage":{"Plain":{...}},"UserIp":"::1"}
-```
-
-Для Reaction вместо Plain используется `ClientMessage.Reaction`.
-
-History request: `{"ChatId": chat_id, "Limit": limit}` и опциональный
-`MaxTimestamp`. Response содержит `Chats`; нужная комната обязана иметь ровно
-запрошенный `ChatId`, а сообщения находятся в `Messages`.
-
-`message_info` request содержит `ChatId` и `Timestamp`; response может вернуть
-message в `Message`, `ServerMessage` либо `MessageInfo`-совместимом envelope.
-
-### Нормализованные результаты
-
-`read_history(...)` возвращает dict:
+Download:
 
 ```text
-{
-  "chat_id": <str>, "messages": <list>, "count": <int>,
-  "next_before_ts": <oldest timestamp|null>
-}
+https://files.messenger.yandex.ru/file_shortterm/<file_id>
 ```
 
-Preview мутации содержит `fingerprint` и `status=preview_not_applied`.
-После confirm:
+В media ID разрешены namespace-сегменты из букв ASCII, цифр, `.`, `_`
+и `-`, разделённые `/`. Пустые сегменты, `.`, `..`, URL и query
+отклоняются. Разделители namespace в download URL сохраняются.
 
-- `send_message`: `outcome`, `chat_id`, `message_info`, `payload_id`;
-- `edit_message`: `outcome`, `message_info`;
-- `set_reaction`: `outcome`, `chat_id`, `timestamp`, `reaction`;
-- document/image: `outcome` и безопасные delivery/verification поля.
+Локальный файл должен иметь абсолютный путь и быть обычным файлом размером
+не более 50 МиБ. Symlink запрещён во всех компонентах пути. Чтение использует
+`O_NOFOLLOW` и сверяет stat до и после операции. PNG проверяется по сигнатуре,
+IHDR, CRC и размерам; APNG не принимается.
 
-`outcome` принимает `confirmed`, `duplicate`, `rejected`, `unknown`.
-Fanout `FullyCommitted`, `Duplicate`, числовые 1/2 либо успешный MessageInfo
-классифицируются как confirmed; Details — rejected; неоднозначный ответ —
-unknown. Неизвестная мутация не повторяется автоматически.
+Перед upload и push создаётся квитанция с правами `0600` в каталоге
+`0700`. Она содержит параметры и стадию операции, но не OAuth и не байты файла.
+Квитанция сама по себе не доказывает доставку; результат сверяется с историей.
 
-### Text/Edit/Reaction wire
+Download создаёт новый файл через `O_EXCL|O_NOFOLLOW`, ограничивает объём
+и удаляет незавершённый файл при ошибке. После разрешённого HTTPS-перенаправления
+OAuth снимается; следующий адрес должен оставаться в зоне
+`*.yandex.ru` или `*.yandex.net`.
 
-Text Plain:
+## Проверка
 
-```text
-ChatId, Text.MessageText, PayloadId
-```
+`tests/cleanroom/test_client.py` проверяет протокол, подтверждения, ошибки
+и файловые ограничения без сети. Тесты используют искусственные ID и токены.
+`tests/test_cleanroom_integration.py` проверяет совместимость со шлюзом.
 
-Edit Plain дополнительно содержит Timestamp и повторно использует исходный
-PayloadId. Reaction wire:
-
-```text
-ChatId, Timestamp, Action (0/1/2), Type (100101/100110)
-```
-
-`Timestamp` во всех `message_info`, Edit и Reaction wire-пакетах передаётся
-JSON-числом. Строковый timestamp сервер отклоняет NACK frame `0x02`.
-`Reaction.Type` также передаётся JSON-числом; строковый код реакции сервер
-отклоняет тем же NACK вместо применения side effect.
-
-### Media wire
-
-Upload endpoint:
-
-```text
-https://files.messenger.yandex.ru/media_upload/
-  <quoted chat-id parts>/<quoted payload UUID>/<quoted filename>
-```
-
-Тело upload — исходные bytes, Content-Type файла, OAuth в заголовке,
-redirect запрещён. Ответ JSON возвращает `file_id`.
-
-Download endpoint:
-
-```text
-https://files.messenger.yandex.ru/file_shortterm/<quoted file_id>
-```
-
-OAuth только на первом запросе; после проверенного redirect заголовок снимается.
-
-Document Plain использует `MiscFile.FileInfo` с Id2/Name/Size/Source.
-`Source` — JSON integer `0`; story_id остаётся локальным id квитанции.
-Media file_id — namespace из slash-разделённых безопасных сегментов; пустые,
-``.`` и ``..`` сегменты, URL, query и percent escapes запрещены.
-Download сохраняет разделители namespace в URL. PNG-gallery использует upload
-Content-Type image/png. Любой document использует application/octet-stream,
-чтобы server image-оптимизация не меняла bytes скачиваемого оригинала.
-Image with caption использует `Gallery.Text` и один item Image с Width/Height,
-Animated=false и FileInfo.
-
-### render_message actual envelope
-
-Основной wire message имеет `ServerMessage`, внутри `ClientMessage.Plain` и
-`ServerMessageInfo`. Timestamp/SeqNo/Version/From/Deleted берутся из info;
-Text/Gallery/MiscFile/PayloadId — из Plain. Неизвестные поля не выдаются.
+Проверка реального сервиса описана в
+[руководстве эксплуатации](../OPERATIONS.md). Успешный unit-тест не подтверждает
+отправку сообщения или файла в Мессенджер.
