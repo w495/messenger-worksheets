@@ -23,16 +23,24 @@ StateDirectoryMode=0700
 NoNewPrivileges=yes
 PrivateDevices=yes
 PrivateTmp=yes
+PrivateMounts=yes
 ProtectControlGroups=yes
 ProtectHome=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectSystem=strict
+ProtectProc=invisible
+ProcSubset=pid
+InaccessiblePaths=-/data -/mnt -/media -/srv
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 SystemCallArchitectures=native
+TasksMax=512
+MemoryHigh=65%
+MemoryMax=75%
+CPUQuota=400%
 
 [Install]
 WantedBy=multi-user.target

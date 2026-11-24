@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import sqlite3
 import stat
 import subprocess
@@ -20,7 +21,10 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request as HTTPRequest, build_opener
 import uuid
 
-from messenger_codex.bridge import DISABLED_FEATURES, INSTRUCTIONS, TASK_INSTRUCTIONS
+from messenger_codex.bridge import (
+    DISABLED_FEATURES, INSTRUCTIONS, NETWORK_TASK_INSTRUCTIONS,
+    OFFLINE_TASK_INSTRUCTIONS, TASK_INSTRUCTIONS,
+)
 
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -32,20 +36,63 @@ LOCAL_USER_DISABLED_FEATURES = ("apps", "browser_use", "computer_use", "remote_p
 DIRECT_HISTORY_ITEMS = 20
 DIRECT_HISTORY_BYTES = 64 * 1024
 DIRECT_RESPONSE_BYTES = 2 * 1024 * 1024
+TASK_TIMEOUT_ENV = "WORKSHEET_CODEX_TASK_TIMEOUT"
+CHAT_TIMEOUT_ENV = "WORKSHEET_CODEX_CHAT_TIMEOUT"
 
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Запретить следование HTTP-перенаправлениям при обращении к модели.
+
+        Параметры: req — HTTP request; fp — response stream; code — HTTP status; msg — status text; headers — headers; newurl — redirect URL.
+        Результат: None, поэтому urllib не следует HTTP redirect.
+        Исключения: Не генерирует собственных исключений.
+        Побочные эффекты: Побочных эффектов нет.
+        Безопасность: Authorization и request body не пересылаются на новый URL."""
         return None
 
 
 class CodexExecutionError(RuntimeError):
     def __init__(self, category: str):
+        """Создать ошибку исполнения с безопасной категорией без диагностических секретов.
+
+        Параметры: category — безопасная error category.
+        Результат: Объект исключения с безопасной category.
+        Исключения: Не генерирует собственных исключений.
+        Побочные эффекты: Изменяет только создаваемый объект.
+        Безопасность: Хранит категорию, а не stderr/stdout или API credentials."""
         super().__init__(category)
         self.category = category
 
 
+def execution_timeout(task: bool) -> int:
+    """Вернуть ограниченный timeout Codex для чата или задачи.
+
+    Параметры: task — режим task.
+    Результат: Task/chat timeout в секундах в диапазоне 1..3600.
+    Исключения: ValueError для нецелой или выходящей за диапазон env-настройки.
+    Побочные эффекты: Читает одну переменную окружения.
+    Безопасность: Невалидная конфигурация отклоняется, а не превращается в неограниченное выполнение."""
+    name = TASK_TIMEOUT_ENV if task else CHAT_TIMEOUT_ENV
+    default = 1800 if task else 120
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+    if not 1 <= value <= 3600:
+        raise ValueError(f"{name} must be in range 1..3600")
+    return value
+
+
 def failure_category(stderr: str, stdout: str) -> str:
+    """Сопоставить stderr/stdout Codex с безопасной публичной категорией отказа.
+
+    Параметры: stderr — process stderr; stdout — JSON event stream.
+    Результат: Одну из authentication, forbidden, rate_limited, model_unavailable, connection, configuration или unknown.
+    Исключения: Не генерирует собственных исключений.
+    Побочные эффекты: Побочных эффектов нет.
+    Безопасность: Возвращает только фиксированную категорию; исходный stderr/stdout не публикуется."""
     diagnostic = (stderr + "\n" + stdout).casefold()
     for category, pattern in (
         ("authentication", r"\b401\b|unauthorized|authentication"),
@@ -69,6 +116,13 @@ class Request:
 
     @classmethod
     def decode(cls, value: object) -> Request:
+        """Строго декодировать data-only job, UUID сессии и ограниченные изображения.
+
+        Параметры: value — JSON job/history.
+        Результат: Неизменяемый Request с текстом, режимом, UUID и кортежем декодированных изображений.
+        Исключения: ValueError для полей/типов/UUID/пустого job/лимита; binascii.Error для невалидного base64.
+        Побочные эффекты: Декодирует изображения в память; входной объект не изменяет.
+        Безопасность: Допускает только четыре формата, общий бюджет 20 MiB и запрещает session у task."""
         if not isinstance(value, dict) or value.keys() != {"text", "task", "session", "images"}:
             raise ValueError("invalid input fields")
         text, task, session, images = (value[key] for key in ("text", "task", "session", "images"))
@@ -97,7 +151,20 @@ class Request:
 
 
 def command(binary: Path, workspace: Path, request: Request, images: tuple[Path, ...]) -> list[str]:
+    """Собрать argv Codex с минимальными разрешениями для выбранного provider и режима.
+
+    Параметры: binary — Codex binary; workspace — job workspace; request — валидированный Request; images — локальные image paths.
+    Результат: Список argv Codex, заканчивающийся stdin-маркером -.
+    Исключения: KeyError для обязательной provider env; ValueError для provider URL, provider или reasoning effort.
+    Побочные эффекты: Читает env и resolve пути binary; процессов не запускает.
+    Безопасность: Не использует shell; chat read-only, обычный task ограничен workspace без сети, admin task включается только явным provider."""
     provider = os.environ.get("WORKSHEET_CODEX_PROVIDER", "endpoint")
+    full_admin_task = provider == "sandbox_admin" and request.task
+    task_instructions = ""
+    if request.task:
+        task_instructions = TASK_INSTRUCTIONS + (
+            NETWORK_TASK_INSTRUCTIONS if full_admin_task else OFFLINE_TASK_INSTRUCTIONS
+        )
     model = os.environ.get("WORKSHEET_CODEX_MODEL")
     model_identity = ""
     if model and re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", model):
@@ -107,7 +174,7 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
         "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
         "-c", "project_doc_max_bytes=0", "-c", 'shell_environment_policy.inherit="none"',
         "-c", 'developer_instructions=' + json.dumps(
-            INSTRUCTIONS + model_identity + (TASK_INSTRUCTIONS if request.task else ""), ensure_ascii=False,
+            INSTRUCTIONS + model_identity + task_instructions, ensure_ascii=False,
         ),
     ]
     if provider == "openai":
@@ -150,7 +217,6 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
         if effort not in REASONING_EFFORTS:
             raise ValueError("unsupported Codex reasoning effort")
         argv.extend(("-c", "model_reasoning_effort=" + json.dumps(effort)))
-    full_admin_task = provider == "sandbox_admin" and request.task
     if full_admin_task:
         argv.extend(("--ephemeral", "--sandbox", "danger-full-access"))
     elif request.task:
@@ -178,6 +244,13 @@ def command(binary: Path, workspace: Path, request: Request, images: tuple[Path,
 
 
 def final_reply(stdout: str, request: Request) -> tuple[str, str | None]:
+    """Разобрать поток JSON-событий Codex и извлечь завершённый ответ и сессию.
+
+    Параметры: stdout — JSON event stream; request — валидированный Request.
+    Результат: Текст до 6000 символов и UUID session для chat либо None для task.
+    Исключения: JSONDecodeError/KeyError/ValueError при повреждённых событиях/UUID; RuntimeError для tool call в chat или незавершённого ответа.
+    Побочные эффекты: Побочных эффектов нет.
+    Безопасность: В chat принимает только agent_message/reasoning; task не возвращает reusable session."""
     reply = ""
     finished = False
     session = request.session
@@ -200,6 +273,13 @@ def final_reply(stdout: str, request: Request) -> tuple[str, str | None]:
 
 
 def result_files(output: Path) -> list[dict]:
+    """Безопасно прочитать регулярные неизменившиеся файлы output в общем лимите.
+
+    Параметры: output — out directory.
+    Результат: Список dict name/base64 для допустимых файлов в общем лимите 50 MiB.
+    Исключения: OSError при directory/stat/open/read, кроме обработанных отсутствующего/не-каталога output.
+    Побочные эффекты: Открывает directory/file descriptors и читает содержимое в память; ничего не изменяет.
+    Безопасность: O_NOFOLLOW, regular+nlink=1, имя без control chars, сверка inode/size/mtime и общий budget защищают от подмены."""
     try:
         directory = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except (FileNotFoundError, NotADirectoryError):
@@ -229,6 +309,13 @@ def result_files(output: Path) -> list[dict]:
 
 
 def _validate_direct_history(value: object) -> list[dict[str, str]]:
+    """Проверить структуру и ограничения истории прямой Responses-сессии.
+
+    Параметры: value — JSON job/history.
+    Результат: Новый список только с role/text для не более 20 валидных сообщений.
+    Исключения: ValueError для неверного контейнера, ключей, role, типа или текста >8000.
+    Побочные эффекты: Создаёт копии словарей; вход не изменяет.
+    Безопасность: Не пропускает дополнительные поля и произвольные роли в model transcript."""
     if not isinstance(value, list) or len(value) > DIRECT_HISTORY_ITEMS:
         raise ValueError("invalid direct session history")
     messages = []
@@ -243,6 +330,13 @@ def _validate_direct_history(value: object) -> list[dict[str, str]]:
 
 
 def _direct_history_json(messages: list[dict[str, str]]) -> str:
+    """Обрезать историю по числу записей и байтовому лимиту и сериализовать её.
+
+    Параметры: messages — проверенная history.
+    Результат: UTF-8 JSON-строку последних сообщений размером не более 64 KiB.
+    Исключения: ValueError, если даже минимальная оставшаяся история превышает byte limit.
+    Побочные эффекты: Сериализует и локально обрезает копию списка; вход не изменяет.
+    Безопасность: Ограничивает и число записей, и байтовый размер persistent history."""
     trimmed = messages[-DIRECT_HISTORY_ITEMS:]
     payload = json.dumps(trimmed, ensure_ascii=False).encode()
     while len(payload) > DIRECT_HISTORY_BYTES and len(trimmed) > 2:
@@ -254,6 +348,13 @@ def _direct_history_json(messages: list[dict[str, str]]) -> str:
 
 
 def _direct_database(state_dir: Path) -> sqlite3.Connection:
+    """Открыть приватную SQLite-базу прямых сессий и создать защищённую схему.
+
+    Параметры: state_dir — приватный state dir.
+    Результат: Открытое sqlite3.Connection с созданной схемой sessions/turns.
+    Исключения: sqlite3.Error или OSError chmod.
+    Побочные эффекты: Создаёт/открывает direct-sessions.sqlite3, chmod 0600, включает secure_delete/WAL и создаёт таблицы.
+    Безопасность: Файл состояния принудительно приватный; SQL использует фиксированную схему."""
     path = state_dir / "direct-sessions.sqlite3"
     database = sqlite3.connect(path, timeout=30)
     os.chmod(path, 0o600)
@@ -275,6 +376,13 @@ def _direct_database(state_dir: Path) -> sqlite3.Connection:
 
 
 def _direct_transcript(messages: list[dict[str, str]], current: str) -> str:
+    """Собрать ограниченный текстовый транскрипт истории и текущего сообщения.
+
+    Параметры: messages — проверенная history; current — текущий text.
+    Результат: Последние не более 48 KiB текста с role labels и текущим USER сообщением.
+    Исключения: KeyError/TypeError только при нарушении проверенного внутреннего history contract.
+    Побочные эффекты: Создаёт строку в памяти; входы не изменяет.
+    Безопасность: Обрезает transcript перед API и маркирует роли самостоятельно, не доверяя role-разметке внутри текста."""
     entries = [f"[{item['role'].upper()}]\n{item['text']}" for item in messages]
     entries.append(f"[USER]\n{current}")
     transcript = "\n\n".join(entries)
@@ -282,6 +390,13 @@ def _direct_transcript(messages: list[dict[str, str]], current: str) -> str:
 
 
 def execute_direct_response(request: Request, state_dir: Path, job_id: str | None) -> dict:
+    """Выполнить текстовый ход через Responses API без tools и идемпотентно сохранить историю.
+
+    Параметры: request — валидированный Request; state_dir — приватный state dir; job_id — канонический UUID job.
+    Результат: Dict text/session/files; task получает отказ без API, chat — ответ и UUID session.
+    Исключения: KeyError/ValueError конфигурации; sqlite3.Error/JSONDecodeError; CodexExecutionError для HTTP/connection/size/status/empty; OSError TLS transport.
+    Побочные эффекты: Читает/обновляет SQLite, отправляет HTTPS Responses request, base64-кодирует images и кеширует turn по job_id.
+    Безопасность: store=false, tools=[], tool_choice=none; history bounded, результат job идемпотентен, API key только в Authorization."""
     if request.task:
         return {
             "text": "В API-режиме доступны текстовые ответы без Codex tools и файловых задач.",
@@ -378,7 +493,62 @@ def execute_direct_response(request: Request, state_dir: Path, job_id: str | Non
     return outcome
 
 
+def terminate_process_group(process_id: int) -> None:
+    """Завершить оставшихся потомков в process group с TERM→KILL escalation.
+
+    Параметры: process_id — PID/PGID лидера.
+    Результат: Ничего; отсутствующая process group считается уже завершённой.
+    Исключения: PermissionError/OSError signal; ProcessLookupError подавляется.
+    Побочные эффекты: Посылает SIGTERM process group, ждёт 50 мс и при необходимости SIGKILL.
+    Безопасность: Сигналы адресуются PGID запущенного job; setsid-потомки остаются под внешней cgroup policy."""
+
+    try:
+        os.killpg(process_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    time.sleep(0.05)
+    try:
+        os.killpg(process_id, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def run_codex_process(
+    argv: list[str], *, workspace: Path, environment: dict[str, str],
+    text: str, timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    """Запустить Codex в отдельной process group и гарантировать уборку потомков.
+
+    Параметры: argv — argv без shell; workspace — job workspace; environment — allowlist env; text — stdin prompt; timeout — жёсткий timeout.
+    Результат: CompletedProcess с args, returncode, stdout и stderr.
+    Исключения: OSError при Popen; subprocess.TimeoutExpired после kill всей group; ошибки communicate/signal.
+    Побочные эффекты: Запускает новую session/process group, передаёт text в stdin, собирает output и всегда выполняет TERM→KILL cleanup потомков.
+    Безопасность: Shell не используется; argv/env/workspace уже подготовлены, cleanup охватывает обычных потомков group."""
+
+    process = subprocess.Popen(
+        argv, cwd=workspace, env=environment, stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    finally:
+        terminate_process_group(process.pid)
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
 def execute(request: Request, state_dir: Path, job_id: str | None = None) -> dict:
+    """Выполнить проверенный job через direct API либо изолированный процесс Codex.
+
+    Параметры: request — валидированный Request; state_dir — приватный state dir; job_id — канонический UUID job.
+    Результат: Dict с text, session и files; files заполнены только для успешного task.
+    Исключения: KeyError/ValueError конфигурации; OSError/TimeoutExpired процесса и ФС; CodexExecutionError при nonzero exit; ошибки direct режима.
+    Побочные эффекты: Создаёт chat workspace или временный task job/input/out, пишет images, запускает Codex/direct API и читает результаты.
+    Безопасность: Messenger credentials не передаются; env allowlist зависит от provider, task files берутся только из проверенного out."""
     if os.environ.get("WORKSHEET_CODEX_PROVIDER") == "responses_direct":
         return execute_direct_response(request, state_dir, job_id)
     binary = Path(os.environ["WORKSHEET_CODEX_BINARY"]).resolve(strict=True)
@@ -407,10 +577,19 @@ def execute(request: Request, state_dir: Path, job_id: str | None = None) -> dic
         elif provider not in {"local_user", "sandbox_admin"}:
             raise ValueError("unsupported worksheet Codex provider")
         def invoke(active: Request) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                command(binary, workspace, active, tuple(images)), cwd=workspace,
-                env=env, input=active.text, text=True, capture_output=True,
-                check=False, timeout=300 if active.task else 120,
+            """Запустить один подготовленный процесс Codex для активного запроса.
+
+            Параметры: active — активный Request после session fallback.
+            Результат: CompletedProcess одного запуска Codex для active Request.
+            Исключения: ValueError/KeyError из command/timeout; OSError или TimeoutExpired из run_codex_process.
+            Побочные эффекты: Строит argv и запускает отдельную process group с подготовленным env/workspace.
+            Безопасность: Использует active request после возможного сброса session и не расширяет allowlist env."""
+            return run_codex_process(
+                command(binary, workspace, active, tuple(images)),
+                workspace=workspace,
+                environment=env,
+                text=active.text,
+                timeout=execution_timeout(active.task),
             )
 
         active_request = request
@@ -432,6 +611,13 @@ def execute(request: Request, state_dir: Path, job_id: str | None = None) -> dic
 
 
 def main() -> None:
+    """Прочитать ограниченный job из stdin, выполнить его и вывести JSON-результат.
+
+    Параметры: нет.
+    Результат: Ничего; пишет один JSON result в stdout.
+    Исключения: ValueError для stdin сверх лимита/невалидного job; JSONDecodeError; исключения execute.
+    Побочные эффекты: Устанавливает umask 077, читает ограниченный stdin, выполняет job и печатает JSON.
+    Безопасность: Читает не более base64 image budget+64 KiB и не выводит API key/окружение."""
     os.umask(0o077)
     limit = (4 * MAX_IMAGE_BYTES) // 3 + 64 * 1024
     data = sys.stdin.buffer.read(limit + 1)

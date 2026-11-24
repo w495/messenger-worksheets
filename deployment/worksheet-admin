@@ -12,12 +12,42 @@ fi
 python=/opt/messenger-worksheets/venv/bin/python
 admin=/opt/messenger-worksheets/admin
 
+# Атомарно меняет только selector Messenger-клиента в одном root-owned env.
+# Содержимое env, включая OAuth и transport token, никогда не печатается;
+# временный файл создаётся в том же каталоге, получает mode 0600 и заменяет
+# исходник через rename. Неизвестное значение backend отклоняется до записи.
+set_gateway_backend() {
+    local environment=$1 backend=$2 temporary
+    if [[ ${backend} != legacy && ${backend} != cleanroom ]]; then
+        echo "Unsupported Messenger backend." >&2
+        return 64
+    fi
+    temporary=$(mktemp "${environment}.XXXXXX")
+    if ! awk -v backend="${backend}" '
+        BEGIN { found = 0 }
+        /^WORKSHEET_MESSENGER_BACKEND=/ {
+            print "WORKSHEET_MESSENGER_BACKEND=" backend
+            found = 1
+            next
+        }
+        { print }
+        END { if (!found) print "WORKSHEET_MESSENGER_BACKEND=" backend }
+    ' "${environment}" > "${temporary}"; then
+        rm -f -- "${temporary}"
+        return 1
+    fi
+    chmod 0600 "${temporary}"
+    chown root:root "${temporary}"
+    mv -f -- "${temporary}" "${environment}"
+}
+
 case $1 in
     status)
         systemctl show worksheet-worker.service worksheet-worker-local-user.service \
             worksheet-worker-sandbox-admin.service \
             worksheet-gateway-api.service worksheet-gateway-local-user.service \
             worksheet-gateway-sandbox-admin.service \
+            worksheet-gateway-bot.service \
             worksheet-gateway.service \
             -p Id -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager
         ;;
@@ -36,6 +66,51 @@ case $1 in
         export PYTHONPATH=/opt/messenger-worksheets/app
         exec "${python}" "${admin}/check_messenger.py" \
             --environment-file /etc/messenger-worksheets/gateway-local-user.env
+        ;;
+    check-messenger-api-cleanroom)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/check_messenger.py" \
+            --environment-file /etc/messenger-worksheets/gateway-api.env \
+            --backend cleanroom
+        ;;
+    check-messenger-local-cleanroom)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/check_messenger.py" \
+            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env \
+            --backend cleanroom
+        ;;
+    # Проверяет каждую цепочку собственным CA, уникальность публичных ключей и
+    # обязательный провал cross-profile verify. Private keys не читаются и
+    # fingerprint не печатаются, поэтому операция безопасна для журнала.
+    check-tls-isolation)
+        declare -A public_keys=()
+        for spec in \
+            api:/etc/messenger-worksheets/ca-api.crt:/etc/messenger-worksheets/worker/server.crt \
+            local:/etc/messenger-worksheets/ca-local-user.crt:/etc/messenger-worksheets/local-user/server.crt \
+            sandbox:/etc/messenger-worksheets/ca-sandbox-admin.crt:/etc/messenger-worksheets/sandbox-admin/server.crt; do
+            IFS=: read -r profile ca_file cert_file <<< "${spec}"
+            openssl verify -x509_strict -CAfile "${ca_file}" -purpose sslserver \
+                "${cert_file}" >/dev/null
+            fingerprint=$(openssl x509 -in "${cert_file}" -pubkey -noout | sha256sum | awk '{print $1}')
+            if [[ -n ${public_keys[${fingerprint}]:-} ]]; then
+                echo "TLS profiles reuse a server public key." >&2
+                exit 1
+            fi
+            public_keys[${fingerprint}]=${profile}
+        done
+        if openssl verify -CAfile /etc/messenger-worksheets/ca-api.crt \
+                /etc/messenger-worksheets/sandbox-admin/server.crt >/dev/null 2>&1 \
+            || openssl verify -CAfile /etc/messenger-worksheets/ca-sandbox-admin.crt \
+                /etc/messenger-worksheets/worker/server.crt >/dev/null 2>&1; then
+            echo "TLS trust roots are not isolated." >&2
+            exit 1
+        fi
+        echo "tls_profile_isolation_ok profiles=3"
+        ;;
+    check-bot)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/check_bot.py" \
+            --environment-file /etc/messenger-worksheets/gateway-bot.env
         ;;
     login-codex)
         exec "${python}" "${admin}/login_codex.py"
@@ -66,6 +141,12 @@ case $1 in
         export PYTHONPATH=/opt/messenger-worksheets/app
         exec "${python}" "${admin}/smoke_test_worker.py" \
             --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env --task
+        ;;
+    smoke-sandbox-link)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/smoke_test_worker.py" \
+            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env \
+            --external-link
         ;;
     set-native-codex)
         shopt -s nullglob
@@ -154,6 +235,53 @@ case $1 in
     stop-gateway-sandbox)
         systemctl stop worksheet-gateway-sandbox-admin.service
         ;;
+    activate-cleanroom-api)
+        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_messenger.py" \
+            --environment-file /etc/messenger-worksheets/gateway-api.env \
+            --backend cleanroom
+        set_gateway_backend /etc/messenger-worksheets/gateway-api.env cleanroom
+        systemctl restart worksheet-gateway-api.service
+        ;;
+    rollback-legacy-api)
+        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_messenger.py" \
+            --environment-file /etc/messenger-worksheets/gateway-api.env \
+            --backend legacy
+        set_gateway_backend /etc/messenger-worksheets/gateway-api.env legacy
+        systemctl restart worksheet-gateway-api.service
+        ;;
+    activate-cleanroom-sandbox)
+        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_messenger.py" \
+            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env \
+            --backend cleanroom
+        set_gateway_backend /etc/messenger-worksheets/gateway-sandbox-admin.env cleanroom
+        systemctl restart worksheet-gateway-sandbox-admin.service
+        ;;
+    rollback-legacy-sandbox)
+        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_messenger.py" \
+            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env \
+            --backend legacy
+        set_gateway_backend /etc/messenger-worksheets/gateway-sandbox-admin.env legacy
+        systemctl restart worksheet-gateway-sandbox-admin.service
+        ;;
+    start-gateway-bot)
+        systemctl start worksheet-gateway-bot.service
+        ;;
+    restart-gateway-bot)
+        systemctl restart worksheet-gateway-bot.service
+        ;;
+    stop-gateway-bot)
+        systemctl stop worksheet-gateway-bot.service
+        ;;
+    activate-bot)
+        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_bot.py" \
+            --environment-file /etc/messenger-worksheets/gateway-bot.env
+        systemctl stop worksheet-gateway-api.service worksheet-gateway-sandbox-admin.service
+        systemctl start worksheet-gateway-bot.service
+        ;;
+    rollback-userbot)
+        systemctl stop worksheet-gateway-bot.service
+        systemctl start worksheet-gateway-api.service worksheet-gateway-sandbox-admin.service
+        ;;
     activate-sandbox)
         systemctl stop worksheet-gateway-local-user.service
         systemctl start worksheet-worker-sandbox-admin.service worksheet-gateway-sandbox-admin.service
@@ -186,6 +314,12 @@ case $1 in
         systemctl disable worksheet-gateway-sandbox-admin.service worksheet-worker-sandbox-admin.service
         systemctl enable worksheet-worker-local-user.service worksheet-gateway-local-user.service
         ;;
+    enable-bot-instance)
+        systemctl disable worksheet-gateway-api.service worksheet-gateway-local-user.service \
+            worksheet-gateway-sandbox-admin.service
+        systemctl enable worksheet-worker.service worksheet-worker-sandbox-admin.service \
+            worksheet-gateway-bot.service
+        ;;
     logs-worker-api)
         journalctl -u worksheet-worker.service -n 100 --no-pager
         ;;
@@ -203,6 +337,9 @@ case $1 in
         ;;
     logs-gateway-sandbox)
         journalctl -u worksheet-gateway-sandbox-admin.service -n 100 --no-pager
+        ;;
+    logs-gateway-bot)
+        journalctl -u worksheet-gateway-bot.service -n 100 --no-pager
         ;;
     revoke)
         rm -f -- /etc/sudoers.d/messenger-worksheets-admin

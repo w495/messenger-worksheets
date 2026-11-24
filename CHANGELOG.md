@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-11-24
+
+- внешние HTTP(S)-ссылки направляются в sandbox task с сетью и инструментами;
+  добавлены отдельные сетевые инструкции, routing tests и live link smoke;
+- clean-room backend используется по умолчанию; legacy adapter и аватарка
+  необязательны и не входят в публичный дистрибутив;
+- самостоятельный код опубликован под AGPL-3.0-only;
+- при ошибке задачи/доставки реакция 👀 на исходном сообщении заменяется на 💔;
+- media file_id принимает реальные namespace-сегменты; FileInfo.Source
+  отправляется integer 0 для документов и изображений;
+- download media сохраняет namespace-разделители в URL и проверяет сегменты
+  до запроса, вместо ошибочного кодирования slash как %2F;
+- task timeout увеличен до 1800 секунд, RPC timeout — до 1860 секунд;
+- worker переведён на bounded concurrency 4 и покрыт тестом двух параллельных jobs;
+- artifact delivery ограничена пятью попытками с безопасным stage-кодом ошибки;
+- worker-профили получили разные CA/leaf/private key и profile-pinned RPC trust;
+- повтор одного job UUID сериализован; result cache и gateway artifacts получили
+  bounded retention/cleanup;
+- sandbox-admin ограничен CPU/memory/tasks и скрывает внешние data mounts;
+- Python 3.14 dependency tree закреплён exact versions и SHA-256 hashes;
+- добавлен независимый clean-room Messenger user client и backend selector с
+  read-only smoke и атомарным rollback при сохранении production SQLite state;
+- clean-room Edit/Reaction используют integer `Timestamp`, Reaction — integer
+  `Type`; строковые поля, вызывавшие NACK и зависший progress, устранены;
+- mutation classifier больше не принимает произвольные nested dict/числа за
+  подтверждённый MessageInfo или успешный commit;
+- добавлен обязательный AST-gate русских docstring для каждой Python-функции;
+- Team Bot API оставлен неактивным экспериментом; production использует `Lang Env`.
+
 ## 2026-11-23
 
 - подготовлен раздельный gateway/worker deployment для systemd;
@@ -22,7 +51,7 @@
 - диагностика выводит безопасный список текстовых GPT model ID и проверяет target даже вне `/v1/models`;
 - добавлен официальный `codex login --with-api-key` под изолированным worker через stdin;
 - добавлен временный root-owned `worksheet-admin` с фиксированными операциями и self-revoke;
-- добавлен opt-in local-user worker для Codex-конфига и auth пользователя `operator`;
+- добавлен opt-in local-user worker для Codex-конфига и auth пользователя `w495`;
 - добавлена read-only проверка точной Messenger identity перед запуском gateway;
 - один переключаемый worker заменён двумя независимыми instances на портах 8443/8444;
 - оба Messenger invite разрешаются read-only при provisioning, chat state и RPC tokens разделены;
@@ -33,7 +62,7 @@
 - исправлена загрузка instance-specific chat/email в Messenger identity-check;
 - статусные сообщения и модельная самореференция переведены в безличный стиль;
 - local-user instance разрешает task/image-generation любому участнику по явной настройке;
-- добавлен отдельный sandbox-admin instance для task-запросов всех участников без доступа к `operator` home;
+- добавлен отдельный sandbox-admin instance для task-запросов всех участников без доступа к `w495` home;
 - worker units разрешают `AF_NETLINK`, необходимый bwrap для локального network namespace;
 - sandbox-admin task-mode включает явно разрешённый внешний network access;
 - sandbox-admin task-mode использует явно разрешённый `danger-full-access` внутри systemd isolation;
@@ -73,6 +102,23 @@
   feeds таких тредов очищаются без бесконечного retry-loop;
 - любые сообщения собственного Messenger-аккаунта исключаются из polling до
   разбора payload, поэтому document/image payload не запускает self-reply loop;
+- `SetReaction` зарегистрирован в confirmation-preview registry, поэтому реакции
+  👀 и ✅ проходят двухфазный вызов вместо `ValueError`;
 - task timeout и другие ошибки завершают progress как `❌ Ошибка.` и снимают 👀
   вместо ложного `✅ Готово.` и реакции успешного завершения;
+- добавлен публичный официальный Bot API client и единый `getUpdates` gateway,
+  маршрутизирующий API- и sandbox-чаты к разным worker-профилям;
+- добавлены безопасная локальная настройка OAuth бота, read-only identity/chat
+  check, атомарное переключение на Team-бота и rollback к legacy userbot;
+- подготовлена квадратная публичная аватарка `Lang Env Bot`;
+- конфигуратор и gateway проверяют ожидаемую organization бота до запуска,
+  чтобы токен из другой организации не приводил к `user_not_in_organization`;
+- ошибка конфигуратора показывает безопасные expected/actual organization IDs;
+- пользовательский OAuth client ID удалён из исходников и принимается только
+  через `MESSENGER_OAUTH_CLIENT_ID` или явный аргумент URL-builder;
+- `X-Ya-Organization-Id` проходит allowlist-проверку как положительное число
+  до добавления в HTTP-заголовки;
+- task execution timeout увеличен до 1800 секунд, task RPC timeout — до 1860;
+- worker переведён на bounded threaded HTTP server с concurrency 4 и тестом
+  реального пересечения двух одновременных task-запросов;
 - добавлены документация и локальная проверка репозитория.

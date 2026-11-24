@@ -13,17 +13,21 @@ from messenger_worksheets import codex_worker
 
 class FakeResponse(BytesIO):
     def __enter__(self):
+        """Возвращает Responses API дубль как контекстный менеджер."""
         return self
 
     def __exit__(self, *args):
+        """Завершает контекст Responses API дубля без подавления исключений."""
         self.close()
 
 
 class FakeOpener:
     def __init__(self):
+        """Создаёт opener-дубль с последовательностью ответов модели."""
         self.requests = []
 
     def open(self, request, timeout):
+        """Записывает запрос модели и возвращает следующий подготовленный ответ."""
         self.requests.append(json.loads(request.data))
         payload = {
             "status": "completed",
@@ -38,6 +42,7 @@ class FakeOpener:
 
 class DirectAdapterTest(unittest.TestCase):
     def setUp(self):
+        """Создаёт приватное состояние и настраивает direct Responses provider."""
         self.temp = tempfile.TemporaryDirectory()
         self.state = Path(self.temp.name)
         self.opener = FakeOpener()
@@ -51,10 +56,12 @@ class DirectAdapterTest(unittest.TestCase):
         )
 
     def tearDown(self):
+        """Восстанавливает окружение после сценария direct adapter."""
         codex_worker.build_opener = self.original_opener
         self.temp.cleanup()
 
     def test_new_resume_and_replay(self):
+        """Проверяет создание, продолжение и идемпотентный replay прямой сессии."""
         request = codex_worker.Request("hello", False, None, ())
         job_id = str(uuid.uuid4())
         first = codex_worker.execute(request, self.state, job_id=job_id)
@@ -78,6 +85,7 @@ class DirectAdapterTest(unittest.TestCase):
         self.assertEqual((self.state / "direct-sessions.sqlite3").stat().st_mode & 0o777, 0o600)
 
     def test_image_and_task_contracts(self):
+        """Проверяет data URL изображения и запрет файловых задач в direct-режиме."""
         image = (".png", b"\x89PNG\r\n\x1a\ncontent")
         outcome = codex_worker.execute(
             codex_worker.Request("see image", False, None, (image,)),

@@ -16,23 +16,28 @@ class FakeMessenger:
     identity = {"guid": "00000000-0000-0000-0000-000000000099"}
 
     def __init__(self):
+        """Создаёт Messenger-дубль с журналом отправок, правок и реакций."""
         self.sent = []
         self.edited = []
         self.reactions = []
 
     def send(self, parent, text, payload):
+        """Записывает отправку и возвращает монотонный timestamp."""
         self.sent.append((parent, text, payload))
         return 777
 
     def edit(self, parent, timestamp, text):
+        """Записывает редактирование сообщения прогресса."""
         self.edited.append((parent, timestamp, text))
 
     def react(self, parent, timestamp, reaction, *, replace=False, remove=False):
+        """Записывает операцию с реакцией."""
         self.reactions.append((parent, timestamp, reaction, replace, remove))
 
 
 class ThreadDiscoveryMessenger(FakeMessenger):
     def new_messages(self, *, parent, after):
+        """Возвращает подготовленные сообщения для обнаружения или polling тредов."""
         self.discovery_call = (parent, after)
         return [
             (101, {"thread_exists": True, "deleted": True}),
@@ -43,6 +48,7 @@ class ThreadDiscoveryMessenger(FakeMessenger):
 
 class BoundaryHistoryClient:
     def fanout(self, operation, payload):
+        """Имитирует пагинацию истории с включёнными граничными timestamp."""
         chat = payload["ChatId"]
         return {
             "Chats": [{
@@ -58,30 +64,38 @@ class BoundaryHistoryClient:
 
 class ThreadRoutingTest(unittest.TestCase):
     def setUp(self):
+        """Создаёт временную БД и мост для сценариев тредов."""
         self.bridge = object.__new__(Bridge)
 
     def tearDown(self):
+        """Закрывает тестовую БД маршрутизации тредов."""
         os.environ.pop("WORKSHEET_REPLY_IN_THREADS", None)
 
     def test_main_chat_reply_uses_incoming_message_as_thread_parent(self):
+        """Проверяет создание треда от входящего сообщения основного чата."""
         os.environ["WORKSHEET_REPLY_IN_THREADS"] = "true"
         self.assertEqual(self.bridge._delivery_parent(0, 123456), 123456)
 
     def test_existing_thread_keeps_original_parent(self):
+        """Проверяет сохранение исходного parent для ответа в существующем треде."""
         os.environ["WORKSHEET_REPLY_IN_THREADS"] = "true"
         self.assertEqual(self.bridge._delivery_parent(111, 222), 111)
 
     def test_disabled_thread_routing_keeps_main_chat(self):
+        """Проверяет ответ в основной чат при выключенной маршрутизации в треды."""
         self.assertEqual(self.bridge._delivery_parent(0, 123456), 0)
 
     def test_spinner_updates_every_100_milliseconds(self):
+        """Проверяет установленный интервал обновления спиннера 100 мс."""
         self.assertEqual(PROGRESS_SECONDS, 0.1)
 
     def test_fill_spinner_uses_six_selected_levels(self):
+        """Проверяет полный вариант спиннера с шестью выбранными уровнями."""
         self.assertIn(("▁", "▂", "▃", "▅", "▆", "▇"), SPINNER_VARIANTS)
         self.assertNotIn(("▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"), SPINNER_VARIANTS)
 
     def test_progress_edits_one_message_and_finishes(self):
+        """Проверяет редактирование одного сообщения прогресса до финального статуса."""
         database = sqlite3.connect(":memory:")
         messenger = FakeMessenger()
         bridge = Bridge(database, messenger, Path("/tmp"))
@@ -97,6 +111,7 @@ class ThreadRoutingTest(unittest.TestCase):
         self.assertTrue(bridge._is_our_reply({"payload_id": messenger.sent[0][2]}))
 
     def test_own_attachment_is_ignored_even_with_derived_payload(self):
+        """Проверяет игнорирование собственного вложения даже с производным payload."""
         database = sqlite3.connect(":memory:")
         messenger = FakeMessenger()
         bridge = Bridge(database, messenger, Path("/tmp"))
@@ -106,13 +121,15 @@ class ThreadRoutingTest(unittest.TestCase):
             "media": [{"kind": "miscfile"}],
         }))
 
-    def test_failed_task_finishes_with_error_and_removes_eyes(self):
+    def test_failed_task_finishes_with_error_and_replaces_eyes_with_broken_heart(self):
+        """Проверяет финальный статус ошибки и замену 👀 на 💔 при сбое задачи."""
         database = sqlite3.connect(":memory:")
         messenger = FakeMessenger()
         bridge = Bridge(database, messenger, Path("/tmp"))
         bridge._is_owner_task = lambda message: True
 
         def fail_task(*args, **kwargs):
+            """Имитирует классифицированный сбой файловой задачи."""
             raise CodexTurnError("worker_http_503")
 
         bridge._task = fail_task
@@ -120,10 +137,11 @@ class ThreadRoutingTest(unittest.TestCase):
         self.assertEqual(messenger.edited[-1][2], "❌ Ошибка.")
         self.assertEqual(messenger.reactions, [
             (0, 123, "👀", False, False),
-            (0, 123, "👀", False, True),
+            (0, 123, "💔", True, False),
         ])
 
     def test_history_skips_inclusive_cursor_boundaries(self):
+        """Проверяет исключение обеих включённых границ при чтении истории."""
         messenger = object.__new__(Messenger)
         messenger.chat = "0/0/00000000-0000-0000-0000-000000000000"
         messenger.client = BoundaryHistoryClient()
@@ -132,7 +150,20 @@ class ThreadRoutingTest(unittest.TestCase):
         messages = messenger.new_messages(parent=0, after=100)
         self.assertEqual([stamp for stamp, _ in messages], [101])
 
+    def test_terminal_artifact_failure_uses_broken_heart(self):
+        """Доставка с terminal failure завершает progress ошибкой и реакцией 💔."""
+        database = sqlite3.connect(":memory:")
+        messenger = FakeMessenger()
+        bridge = Bridge(database, messenger, Path("/tmp"))
+        bridge._draft = lambda *args: ("Подготовлен файл.", "session")
+        bridge._send_artifacts = lambda *args, **kwargs: 1
+        bridge._respond(0, 123, "prompt", {"text": "ответ"}, None)
+        self.assertEqual(messenger.edited[-1][2], "❌ Ошибка.")
+        self.assertEqual(messenger.reactions[-1], (0, 123, "💔", True, False))
+        self.assertIn("Не удалось доставить", messenger.sent[-1][1])
+
     def test_thread_discovery_removes_deleted_parent_feeds(self):
+        """Проверяет удаление feed при удалении родительского сообщения треда."""
         database = sqlite3.connect(":memory:")
         messenger = ThreadDiscoveryMessenger()
         bridge = Bridge(database, messenger, Path("/tmp"))

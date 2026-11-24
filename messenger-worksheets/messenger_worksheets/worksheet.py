@@ -45,6 +45,13 @@ MODEL_INSTRUCTIONS = (
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Запретить перенаправления при запросе к модели генерации worksheet.
+
+        Параметры: req — исходный HTTP request; fp — поток ответа; code — HTTP status; msg — описание status; headers — HTTP headers; newurl — URL redirect.
+        Результат: None, что инструктирует urllib не следовать redirect.
+        Исключения: Не генерирует собственных исключений.
+        Побочные эффекты: Побочных эффектов нет.
+        Безопасность: Не позволяет перенести Authorization или запрос worksheet на новый URL."""
         return None
 
 
@@ -62,6 +69,13 @@ class Worksheet:
 
 
 def checked_text(value: object, maximum: int, *, allow_empty: bool = False) -> str:
+    """Проверить тип, длину, пустоту и управляющие символы пользовательского текста.
+
+    Параметры: value — проверяемое значение; maximum — максимум символов; allow_empty — разрешить пустую строку.
+    Результат: Обрезанную по краям строку, прошедшую ограничения.
+    Исключения: ValueError для не-строки, превышения maximum, запрещённой пустоты или управляющих символов.
+    Побочные эффекты: Побочных эффектов нет.
+    Безопасность: Не нормализует и не исполняет текст; разрешает из control chars только newline и tab."""
     if not isinstance(value, str) or len(value) > maximum:
         raise ValueError("invalid worksheet text length")
     text = value.strip()
@@ -73,6 +87,13 @@ def checked_text(value: object, maximum: int, *, allow_empty: bool = False) -> s
 
 
 def parse_worksheet(raw: object) -> Worksheet:
+    """Строго преобразовать JSON-подобный объект в неизменяемую структуру worksheet.
+
+    Параметры: raw — JSON-подобная worksheet структура.
+    Результат: Неизменяемый Worksheet с кортежем проверенных Exercise.
+    Исключения: ValueError для лишних/пропущенных полей, числа упражнений вне 1..30 или невалидного текста.
+    Побочные эффекты: Создаёт новые dataclass-объекты; входной dict не изменяет.
+    Безопасность: Rejects unknown fields и применяет лимиты ко всем пользовательским строкам до рендера."""
     if not isinstance(raw, dict) or raw.keys() != {"title", "instructions", "exercises"}:
         raise ValueError("invalid worksheet fields")
     exercises = raw["exercises"]
@@ -91,7 +112,13 @@ def parse_worksheet(raw: object) -> Worksheet:
 
 
 def generate_worksheet(request: str) -> Worksheet:
-    """Use the deployment's approved Responses API endpoint with tools disabled."""
+    """Запросить worksheet у разрешённого Responses endpoint с жёсткой JSON-схемой.
+
+    Параметры: request — пользовательский запрос.
+    Результат: Worksheet, разобранный из единственного structured output модели.
+    Исключения: KeyError для отсутствующей env-конфигурации; ValueError для endpoint/request/schema; RuntimeError для HTTP status, тела >512 KiB, незавершённого/пустого ответа; URLError/JSONDecodeError при сетевом/JSON-сбое.
+    Побочные эффекты: Выполняет один HTTPS Responses-запрос с bearer token и читает ограниченное тело.
+    Безопасность: Endpoint обязан быть HTTPS без userinfo/query/fragment; redirect запрещён, tools не передаются, output закреплён строгой JSON Schema."""
     endpoint = os.environ["WORKSHEET_MODEL_ENDPOINT"]
     url = urlsplit(endpoint)
     if (
@@ -135,6 +162,13 @@ def generate_worksheet(request: str) -> Worksheet:
 
 
 def render_pdf(worksheet: Worksheet, output: Path, *, include_key: bool = True) -> None:
+    """Собрать PDF worksheet и опциональный ключ ответов из проверенной структуры.
+
+    Параметры: worksheet — проверенный Worksheet; output — путь PDF; include_key — добавить answer key.
+    Результат: Ничего; при успехе output содержит собранный PDF.
+    Исключения: ImportError при отсутствии ReportLab; OSError/font/ReportLab exceptions при чтении шрифтов или записи PDF.
+    Побочные эффекты: Регистрирует DejaVu fonts и создаёт/перезаписывает output PDF.
+    Безопасность: Все пользовательские строки проходят escape в nested paragraph; структура уже ограничена parse_worksheet."""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.pdfbase import pdfmetrics
@@ -148,6 +182,13 @@ def render_pdf(worksheet: Worksheet, output: Path, *, include_key: bool = True) 
     body = ParagraphStyle("Exercise", fontName="Worksheet", fontSize=11, leading=16, spaceAfter=10)
 
     def paragraph(text: str, style: ParagraphStyle = body) -> Paragraph:
+        """Экранировать пользовательский текст и создать безопасный ReportLab Paragraph.
+
+        Параметры: text — текст сообщения; style — ReportLab style.
+        Результат: ReportLab Paragraph с escaped текстом и выбранным style.
+        Исключения: Исключения ReportLab при некорректном style/создании Paragraph.
+        Побочные эффекты: Создаёт объект Paragraph; внешнего состояния не изменяет.
+        Безопасность: HTML-значимые символы экранируются до замены newline на безопасный br tag."""
         return Paragraph(escape(text).replace("\n", "<br/>"), style)
 
     story = [paragraph(worksheet.title, heading)]
@@ -164,6 +205,13 @@ def render_pdf(worksheet: Worksheet, output: Path, *, include_key: bool = True) 
 
 
 def main() -> None:
+    """Прочитать ограниченный worksheet или запрос из stdin и записать PDF.
+
+    Параметры: нет.
+    Результат: Ничего; при успехе PDF записан по CLI-пути.
+    Исключения: SystemExit от argparse; ValueError при stdin >128 KiB или валидации; UnicodeDecodeError/JSONDecodeError; исключения generate_worksheet/render_pdf.
+    Побочные эффекты: Читает stdin, при --from-request вызывает модель и записывает PDF.
+    Безопасность: Жёстко ограничивает stdin; student-copy влияет только на ключ ответов, а контент проходит parse/generate validation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("--student-copy", action="store_true")

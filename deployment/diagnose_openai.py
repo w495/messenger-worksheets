@@ -28,6 +28,17 @@ DISABLED = (
 
 
 def load_worker_environment() -> dict[str, str]:
+    """Прочитать только API key и путь Codex из root-owned worker env.
+
+    Результат:
+        Словарь двух обязательных значений для диагностических probes.
+
+    Исключения:
+        ``RuntimeError`` при неполной конфигурации.
+
+    Инварианты безопасности:
+        Файл не исполняется, неизвестные ключи игнорируются, значения не печатаются.
+    """
     values: dict[str, str] = {}
     for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
         if not line or line.startswith("#"):
@@ -41,6 +52,20 @@ def load_worker_environment() -> dict[str, str]:
 
 
 def api_probe(key: str) -> tuple[str, list[str]]:
+    """Проверить OpenAI Models API и вернуть только статус и безопасные model id.
+
+    Параметры:
+        key: API key, используемый исключительно в Authorization header.
+
+    Результат:
+        Безопасная строка HTTP/network статуса и список строковых model id.
+
+    Побочные эффекты:
+        Выполняет один HTTPS GET без proxy и не выводит body ответа.
+
+    Инварианты безопасности:
+        Ключ и сырой error body не включаются в исключения или результат.
+    """
     request = Request(
         "https://api.openai.com/v1/models",
         headers={"Authorization": "Bearer " + key},
@@ -62,6 +87,14 @@ def api_probe(key: str) -> tuple[str, list[str]]:
 
 
 def relevant_text_models(models: list[str]) -> list[str]:
+    """Отфильтровать текстовые GPT model id для безопасного диагностического вывода.
+
+    Параметры:
+        models: Идентификаторы из Models API.
+
+    Результат:
+        Отсортированный allowlist синтаксически безопасных текстовых моделей.
+    """
     excluded = ("audio", "image", "realtime", "search", "transcribe", "tts")
     return sorted(
         model for model in models
@@ -72,12 +105,31 @@ def relevant_text_models(models: list[str]) -> list[str]:
 
 
 def safe_identifier(value: object) -> str:
+    """Свести внешнее значение к печатаемому идентификатору либо ``unknown``.
+
+    Параметры:
+        value: Недоверенное поле структурированного ответа.
+
+    Результат:
+        Строка из ограниченного алфавита длиной до ста символов.
+
+    Инварианты безопасности:
+        Произвольный текст и управляющие символы никогда не попадают в журнал.
+    """
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", value):
         return "unknown"
     return value
 
 
 def safe_rate_headers(headers: object) -> str:
+    """Собрать безопасную проекцию стандартных rate-limit заголовков.
+
+    Параметры:
+        headers: HTTP headers либо совместимый объект с методом ``get``.
+
+    Результат:
+        Пробельно-разделённые пары имён и валидированных значений без credentials.
+    """
     values = []
     for name in (
         "x-ratelimit-limit-requests",
@@ -94,6 +146,21 @@ def safe_rate_headers(headers: object) -> str:
 
 
 def responses_probe(key: str, model: str) -> str:
+    """Выполнить минимальный Responses API probe указанной модели.
+
+    Параметры:
+        key: API key только для Authorization header.
+        model: Проверяемый model id из безопасного каталога.
+
+    Результат:
+        HTTP/status классификация, безопасные error code/type и лимиты.
+
+    Побочные эффекты:
+        Создаёт один ``store=false`` HTTPS-запрос без публикации ответа.
+
+    Инварианты безопасности:
+        Body успешного ответа отбрасывается, error body проходит JSON-проекцию.
+    """
     body = json.dumps({
         "model": model,
         "input": "Reply exactly API_OK",
@@ -127,6 +194,20 @@ def responses_probe(key: str, model: str) -> str:
 
 
 def resolve_native_codex(configured: str) -> str:
+    """Разрешить JS-launcher Codex в единственный нативный executable.
+
+    Параметры:
+        configured: Путь из проверенного worker env.
+
+    Результат:
+        Абсолютный путь к configured executable или его нативному vendor binary.
+
+    Исключения:
+        Ошибка при отсутствующем пути или неоднозначном наборе binary.
+
+    Инварианты безопасности:
+        Поиск ограничен package-каталогом уже настроенного Codex.
+    """
     path = Path(configured).resolve(strict=True)
     if path.suffix != ".js":
         return str(path)
@@ -139,6 +220,19 @@ def resolve_native_codex(configured: str) -> str:
 
 
 def classify_diagnostic(stderr: str, stdout: str, returncode: int) -> str:
+    """Классифицировать сырой вывод Codex в фиксированную безопасную категорию.
+
+    Параметры:
+        stderr: Захваченный диагностический поток, не предназначенный для вывода.
+        stdout: Захваченные JSON events, не предназначенные для вывода.
+        returncode: Код завершения процесса.
+
+    Результат:
+        Короткая категория без цитирования исходного текста.
+
+    Инварианты безопасности:
+        Сырые строки, потенциально содержащие credentials, не возвращаются.
+    """
     diagnostic = (stderr + "\n" + stdout).casefold()
     categories = (
         ("login_required", r"not logged in|codex login|login required"),
@@ -157,11 +251,35 @@ def classify_diagnostic(stderr: str, stdout: str, returncode: int) -> str:
 
 
 def structured_signals(stderr: str, stdout: str) -> str:
+    """Извлечь из Codex output только allowlisted структурированные сигналы.
+
+    Параметры:
+        stderr: Сырой stderr для локального поиска фиксированных маркеров.
+        stdout: Поток JSONL событий Codex.
+
+    Результат:
+        Строка codes/types/statuses/dimensions без свободного текста.
+
+    Инварианты безопасности:
+        Значения проходят ``safe_identifier``; body и сообщения не цитируются.
+    """
     codes: set[str] = set()
     types: set[str] = set()
     statuses: set[str] = set()
 
     def visit(value: object, in_error: bool = False) -> None:
+        """Рекурсивно собрать allowlisted поля только внутри объекта ``error``.
+
+        Параметры:
+            value: Текущий JSON-узел.
+            in_error: Находится ли узел внутри error envelope.
+
+        Побочные эффекты:
+            Дополняет замкнутые множества codes, types и statuses.
+
+        Инварианты безопасности:
+            Свободные строки и неизвестные поля полностью игнорируются.
+        """
         if isinstance(value, dict):
             for key, item in value.items():
                 child_error = in_error or key == "error"
@@ -215,6 +333,24 @@ def structured_signals(stderr: str, stdout: str) -> str:
 
 
 def codex_probe(binary: str, key: str, model: str, *, direct: bool = False) -> str:
+    """Запустить изолированный Codex probe с жёстким таймаутом и redaction.
+
+    Параметры:
+        binary: Абсолютный путь к нативному Codex.
+        key: API key, передаваемый только через environment дочернего процесса.
+        model: Проверяемый model id.
+        direct: Включить диагностический custom provider вместо штатного OpenAI.
+
+    Результат:
+        ``codex_cli=ok`` либо безопасная категория завершения и сигналы.
+
+    Побочные эффекты:
+        Запускает процесс под системным worker, пишет только во временные файлы
+        и при таймауте завершает всю его process group.
+
+    Инварианты безопасности:
+        Shell не используется; сырой stdout/stderr и API key не печатаются.
+    """
     account = pwd.getpwnam("worksheet-worker")
     provider_config = ["-c", 'model_provider="openai"']
     if direct:
@@ -288,6 +424,17 @@ def codex_probe(binary: str, key: str, model: str, *, direct: bool = False) -> s
 
 
 def main() -> None:
+    """Выполнить redacted диагностику API, модели и двух Codex provider routes.
+
+    Исключения:
+        Отклоняет запуск без root и пробрасывает ошибки локальной конфигурации.
+
+    Побочные эффекты:
+        Выполняет HTTPS и subprocess probes, печатая только безопасные статусы.
+
+    Инварианты безопасности:
+        Ни API key, ни response body, ни сырой Codex output не выводятся.
+    """
     if os.geteuid() != 0:
         raise SystemExit("Run this diagnostic with sudo.")
     values = load_worker_environment()

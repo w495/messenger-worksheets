@@ -16,6 +16,17 @@ REQUIRED = {"WORKSHEET_CODEX_API_KEY", "WORKSHEET_CODEX_BINARY"}
 
 
 def load_worker_environment() -> dict[str, str]:
+    """Извлечь API key и Codex binary из root-owned worker env.
+
+    Результат:
+        Словарь ровно двух обязательных параметров.
+
+    Исключения:
+        ``RuntimeError`` при отсутствии любого обязательного поля.
+
+    Инварианты безопасности:
+        Файл не исполняется, неизвестные поля и комментарии игнорируются.
+    """
     values: dict[str, str] = {}
     for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
         if not line or line.startswith("#"):
@@ -29,6 +40,22 @@ def load_worker_environment() -> dict[str, str]:
 
 
 def worker_command(binary: str, *arguments: str, stdin: str | None = None) -> int:
+    """Выполнить Codex-команду под системным worker без shell.
+
+    Параметры:
+        binary: Абсолютный путь к Codex.
+        arguments: Аргументы CLI как отдельные строки.
+        stdin: Необязательный секретный ввод, передаваемый через pipe.
+
+    Результат:
+        Код завершения либо 124 после контролируемого таймаута.
+
+    Побочные эффекты:
+        Запускает process group с пониженными uid/gid и при зависании убивает её.
+
+    Инварианты безопасности:
+        stdout/stderr не печатаются; секрет не попадает в argv или shell.
+    """
     account = pwd.getpwnam("worksheet-worker")
     command = [
         "/usr/bin/setpriv",
@@ -64,6 +91,18 @@ def worker_command(binary: str, *arguments: str, stdin: str | None = None) -> in
 
 
 def main() -> None:
+    """Авторизовать изолированный Codex worker API key и проверить статус.
+
+    Исключения:
+        Завершает работу ошибкой без root или при любом ненулевом exit code.
+
+    Побочные эффекты:
+        Передаёт API key через stdin официальному ``codex login`` и изменяет
+        auth-state только системного worker HOME.
+
+    Инварианты безопасности:
+        Ключ не печатается, не передаётся аргументом и не сохраняется скриптом.
+    """
     if os.geteuid() != 0:
         raise SystemExit("Run this login helper with sudo.")
     values = load_worker_environment()

@@ -17,6 +17,18 @@ STATE_DIR = Path("/var/lib/messenger-worksheets-worker")
 
 
 def main() -> None:
+    """Запустить официальный network-only Codex doctor под worker-аккаунтом.
+
+    Исключения:
+        Отклоняет запуск без root, таймаут, не-JSON ответ и ненулевой exit code.
+
+    Побочные эффекты:
+        Запускает Codex через ``setpriv`` и печатает его структурированный JSON.
+
+    Инварианты безопасности:
+        API key передаётся только environment дочернего процесса; stderr
+        отбрасывается, а process group жёстко завершается по таймауту.
+    """
     if os.geteuid() != 0:
         raise SystemExit("Run this diagnostic with sudo.")
     values = load_worker_environment()

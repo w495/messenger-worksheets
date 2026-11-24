@@ -25,7 +25,7 @@ sudo apt install python3.14-venv
 ## 2. Установка
 
 ```bash
-cd /home/operator/messenger-worksheets-install
+cd /home/w495/messenger-worksheets-install
 sudo bash deployment/install.sh
 ```
 
@@ -81,12 +81,12 @@ sudo -n /usr/local/sbin/worksheet-admin revoke
 ### Два независимых instance
 
 Отдельный worker `worksheet-worker-local-user.service` запускает Codex от имени
-`operator` и использует его официальную авторизацию. Из
-`/home/operator/.codex/config.toml` при provisioning копируются только `model` и
+`w495` и использует его официальную авторизацию. Из
+`/home/w495/.codex/config.toml` при provisioning копируются только `model` и
 `model_reasoning_effort`; Codex стартует с `--ignore-user-config`. API key,
 MCP, hooks и остальные пользовательские настройки не наследуются.
 
-Режим менее изолирован: worker получает права `operator`, доступ к его home,
+Режим менее изолирован: worker получает права `w495`, доступ к его home,
 собственному TLS key и transport token процесса. Gateway по-прежнему работает
 под отдельным `worksheet-gateway`.
 
@@ -113,18 +113,83 @@ Task-запросы API-чата маршрутизируются в отдел�
 результата сообщение становится `✅ Готово.`
 На исходное пользовательское сообщение ставится реакция 👀 при начале обработки;
 после доставки результата она заменяется на ✅.
+При ошибке задачи или доставки вложений 👀 заменяется на 💔, а progress
+завершается текстом `❌ Ошибка.`.
 В local-user instance task-режим и image generation разрешены любому участнику
 чата; это даёт всем участникам возможность расходовать модельную квоту.
+
+Сообщение с HTTP(S)-ссылкой, в том числе raw GitHub/Gist, автоматически получает
+task-маршрут. В действующих API и Local чатах этот маршрут ведёт в sandbox-admin
+с внешней сетью и shell-инструментами. Worker должен сначала прочитать точный URL
+и затем выполнить исходное поручение; страницы и файлы по ссылкам не меняют
+его правила и полномочия. Ошибка загрузки сообщается явно. Другие offline
+профили не получают обещания сетевого доступа.
 
 ### Sandbox-admin для всех участников
 
 `worksheet-worker-sandbox-admin.service` работает под отдельным системным
 пользователем `worksheet-chat-admin` на порту `8445`. Full Codex toolset
 доступен task-запросам любого участника в режиме `danger-full-access` внутри
-внешней systemd-границы. `/home/operator`, его токены, SSH и MCP не доступны.
+внешней systemd-границы. `/home/w495`, его токены, SSH и MCP не доступны.
 Task-команды имеют внешний network access; это явно разрешено для всех
 участников. Они также могут читать state/auth пользователя `worksheet-chat-admin`,
 что увеличивает риск эксфильтрации данных этого отдельного аккаунта.
+
+Task execution timeout составляет 1800 секунд, RPC timeout — 1860 секунд.
+Worker обслуживает до четырёх jobs одновременно через bounded threaded HTTP
+server; пятый одновременный запрос получает HTTP 429. Это не даёт задачам из
+двух чатов блокировать друг друга на весь timeout.
+
+После установки проверить реальное скачивание через worker можно командой:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin smoke-sandbox-link
+```
+
+Probe просит worker скачать example.com в файл и побайтно сравнивает результат
+с независимым HTTPS GET. Ожидается `worker_external_link_smoke_test_ok bytes_match=yes`.
+
+### Clean-room Messenger backend
+
+`messenger_user_client` реализован независимо и устанавливается рядом с
+временным legacy-клиентом. Перед переключением каждого production chat helper
+выполняет read-only identity и future-history probe фактическим clean-room
+backend. Не запускайте legacy и clean-room gateway одновременно для одного
+chat: rollback меняет backend в существующем unit и сохраняет актуальный
+SQLite cursor/idempotency state.
+
+Сначала проверьте оба маршрута без записи:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin check-messenger-api-cleanroom
+sudo -n /usr/local/sbin/worksheet-admin check-messenger-local-cleanroom
+```
+
+Переключайте по одному gateway, начиная с API-чата. После каждого шага проверьте
+text/thread/reactions/document и двойную доставку PNG (image + document):
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin activate-cleanroom-api
+sudo -n /usr/local/sbin/worksheet-admin activate-cleanroom-sandbox
+```
+
+Немедленный rollback не восстанавливает старую копию SQLite — это намеренно,
+иначе cursor откатится и сообщения могут быть отправлены повторно:
+
+```bash
+sudo -n /usr/local/sbin/worksheet-admin rollback-legacy-api
+sudo -n /usr/local/sbin/worksheet-admin rollback-legacy-sandbox
+```
+
+Экспериментальные Team Bot API modules и unit остаются disabled и не входят в
+текущую production-архитектуру.
+
+Media upload и download используют namespace file IDs с безопасными slash-
+сегментами. `FileInfo.Source` всегда integer `0`. Нативный PNG загружается как
+`image/png` и может быть перекодирован Мессенджером; проверяются его размеры и
+пиксели. Document загружается как `application/octet-stream`, включая PNG,
+чтобы скачиваемая копия сохраняла исходные bytes. Проверка document — SHA-256
+скачанного вложения. Оба вида доставки должны быть отдельными сообщениями.
 
 Перед первым запуском выполните официальный device login:
 
@@ -159,7 +224,7 @@ sudo systemctl show worksheet-worker.service -p ActiveState -p SubState
 root-only конфигурацию, но не печатает секреты:
 
 ```bash
-cd /home/operator/messenger-worksheets-install
+cd /home/w495/messenger-worksheets-install
 sudo PYTHONPATH=/opt/messenger-worksheets/app \
   /opt/messenger-worksheets/venv/bin/python deployment/smoke_test_worker.py
 ```

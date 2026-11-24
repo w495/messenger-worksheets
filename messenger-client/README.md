@@ -1,12 +1,11 @@
-# Messenger client dependency
+# Необязательный legacy-клиент
 
-The production deployment requires an authorized Messenger client that exports
-`client.py` and `transport.py` in this directory.
+Публичный проект содержит полный независимый клиент в
+`messenger-worksheets/messenger_user_client/` и использует его по умолчанию.
+Для установки и работы файлы в этой директории не нужны.
 
-Those modules are environment-specific and intentionally excluded from this
-public repository. Obtain them through an authorized distribution channel. Do
-not commit OAuth tokens, generated environment files, or transport credentials.
-
-The client contract used by the gateway includes `set_reaction()` with
-`SetReaction` registered as a confirmation-preview mutation, in addition to
-message, document, image, history, thread, and media operations.
+Поддержка `WORKSHEET_MESSENGER_BACKEND=legacy` оставлена для отдельно полученного
+правомерного дистрибутива с `client.py` и `transport.py`. Эти модули не входят
+в публичный репозиторий и не перелицензируются под AGPL данным проектом.
+Rollback сначала проверяет наличие и identity legacy-клиента; при ошибке
+работающий clean-room gateway остаётся включённым.

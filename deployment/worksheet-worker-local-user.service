@@ -5,11 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=operator
-Group=operator
+User=w495
+Group=w495
 WorkingDirectory=/opt/messenger-worksheets/app
 Environment=PYTHONPATH=/opt/messenger-worksheets/app
-Environment=HOME=/home/operator
+Environment=HOME=/home/w495
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=LANG=C.UTF-8
 EnvironmentFile=/etc/messenger-worksheets/worker-local-user.env

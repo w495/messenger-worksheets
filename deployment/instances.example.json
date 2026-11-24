@@ -1,5 +1,6 @@
 {
   "expected_email": "user@example.test",
+  "messenger_backend": "cleanroom",
   "token_file": "/absolute/private/path/to/messenger-token",
   "instances": {
     "api": {
