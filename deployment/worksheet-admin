@@ -51,6 +51,10 @@ case $1 in
             worksheet-gateway.service \
             -p Id -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager
         ;;
+    diagnose-sandbox)
+        export PYTHONPATH=/opt/messenger-worksheets/app
+        exec "${python}" "${admin}/diagnose_sandbox.py"
+        ;;
     diagnose-openai)
         exec "${python}" "${admin}/diagnose_openai.py"
         ;;
