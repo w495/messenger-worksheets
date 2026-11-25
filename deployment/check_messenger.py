@@ -13,7 +13,7 @@ REQUIRED = {
     "WORKSHEET_MESSENGER_EMAIL",
     "WORKSHEET_MESSENGER_TOKEN",
 }
-OPTIONAL = {"WORKSHEET_MESSENGER_BACKEND", "WORKSHEET_MESSENGER_CLIENT_DIR"}
+OPTIONAL = {"WORKSHEET_MESSENGER_BACKEND"}
 
 
 def load_gateway_environment(env_file: Path) -> None:
@@ -63,14 +63,12 @@ def main() -> None:
         raise SystemExit("Run this identity check with sudo.")
     parser = argparse.ArgumentParser()
     parser.add_argument("--environment-file", type=Path, required=True)
-    parser.add_argument("--backend", choices=("legacy", "cleanroom"))
+    parser.add_argument("--backend", choices=("cleanroom",))
     args = parser.parse_args()
     load_gateway_environment(args.environment_file)
     if args.backend is not None:
         os.environ["WORKSHEET_MESSENGER_BACKEND"] = args.backend
     backend = os.environ.get("WORKSHEET_MESSENGER_BACKEND", "cleanroom")
-    if backend == "legacy" and "WORKSHEET_MESSENGER_CLIENT_DIR" not in os.environ:
-        raise RuntimeError("legacy gateway environment has no client directory")
     from messenger_codex.bridge import timestamp_now
     from messenger_worksheets.personal_messenger import CHAT, EMAIL, PersonalMessenger
 

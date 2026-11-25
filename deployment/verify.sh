@@ -1,27 +1,26 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+# shellcheck enable=all
+# shfmt -p -s -i 2 -kp -sr -ci -d
 
-repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+# Все проверки выполняются от корня проекта, независимо от cwd.
+# CDPATH сброшен, чтобы cd не печатал путь в подстановку команды.
+set -eu
+script_directory=$(dirname "$0")
+repo_root=$(CDPATH='' cd "${script_directory}/.." && pwd -P)
 cd "${repo_root}"
 
-bash -n deployment/install.sh deployment/verify.sh deployment/generate_tls.sh deployment/repair_tls.sh \
-    deployment/install_admin_helper.sh deployment/worksheet-admin
-if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck deployment/install.sh deployment/verify.sh deployment/generate_tls.sh deployment/repair_tls.sh \
-        deployment/install_admin_helper.sh deployment/worksheet-admin
-fi
-# AST-gate разбирает только публичные Python-корни проекта, не импортирует код
-# и запрещает добавлять функции без содержательного русского docstring.
-python3 deployment/check_docstrings.py
-python_roots=(messenger-worksheets)
-if [[ -d messenger-client ]]; then
-    python_roots+=(messenger-client)
-fi
-python3 -m compileall -q "${python_roots[@]}" \
-    deployment/check_messenger.py deployment/doctor_openai.py deployment/provision_instances.py \
-    deployment/check_bot.py deployment/configure_bot.py \
-    deployment/smoke_test_worker.py deployment/diagnose_openai.py deployment/login_codex.py \
-    deployment/update_messenger_oauth.py
-PYTHONPATH=messenger-worksheets python3 -m unittest discover -s tests -p 'test_*.py'
+# Проверка shell требует установленных ShellCheck и shfmt. Она также
+# проверяет заголовки, ширину строк и синтаксис доступных оболочек.
+python3 deployment/check_shell_scripts.py
 
-echo "Repository checks passed."
+# AST-проверка не исполняет исходники и не читает конфигурацию с OAuth.
+# У каждой Python-функции должен быть русский docstring.
+python3 deployment/check_docstrings.py
+python3 -m compileall -q messenger-worksheets deployment tests
+
+# Тесты используют временные файлы и подмены внешних клиентов.
+# Боевые службы, чаты и root-конфигурация в проверке не участвуют.
+PYTHONPATH=messenger-worksheets \
+  python3 -m unittest discover -s tests -p 'test_*.py'
+
+printf '%s\n' 'Проверки репозитория пройдены.'

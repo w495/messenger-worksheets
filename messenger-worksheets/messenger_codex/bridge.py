@@ -22,7 +22,6 @@ from urllib.error import HTTPError, URLError
 from messenger_worksheets.text_messages import split_messages, utf16_length
 
 
-LOGIN = "w495"
 PAGE_SIZE = 100
 POLL_SECONDS = 10
 THREAD_DISCOVERY_SECONDS = 60
@@ -326,25 +325,30 @@ def codex_answer(
 
 class Messenger:
     def __init__(self, chat: str):
-        """Подключить клиент личного Messenger к строго заданной учётной записи и чату.
+        """Подключить собственный клиент к заданному чату и ожидаемому email.
 
-        Параметры: chat — канонический ID чата.
-        Результат: Инициализированный адаптер, привязанный к chat и ожидаемому логину.
-        Исключения: ImportError/ошибки конфигурации; ошибки identity клиента; ValueError при некорректном chat.
-        Побочные эффекты: Временно расширяет sys.path, читает токен конфигурации и запрашивает identity Messenger.
-        Безопасность: Клиент создаётся с expected_login, а chat проходит каноническую UUID-проверку."""
-        home = Path.home() / ".stefania"
-        sys.path.insert(0, str(home / "runtime/app"))
-        from scripts.common.config_io import ConfigStore
+        ``chat`` должен быть каноническим ID группы. OAuth и обязательный
+        email берутся из ``WORKSHEET_MESSENGER_TOKEN`` и
+        ``WORKSHEET_MESSENGER_EMAIL``. Проверка личности выполняется через
+        сеть до любого чтения или отправки сообщений.
 
-        sys.path.insert(0, str(home / "flow/app/messenger_clients/user/scripts"))
-        from client import MessengerError, MessengerUserClient, render_message, thread_chat_id
+        Некорректный чат, пустой email и несовпадение аккаунта вызывают
+        исключение. Внешние модули не загружаются; секрет не печатается.
+        """
+        from messenger_user_client import (
+            MessengerError, MessengerUserClient, render_message, thread_chat_id,
+        )
 
-        token = ConfigStore(stefania_home=home).value_of("MESSENGER_TOKEN")
-        self.client = MessengerUserClient(token, expected_login=LOGIN, timeout=12)
+        self.chat = valid_chat(chat)
+        email = os.environ["WORKSHEET_MESSENGER_EMAIL"].strip().casefold()
+        if "@" not in email or len(email) > 254:
+            raise ValueError("invalid expected Messenger email")
+        self.client = MessengerUserClient(
+            os.environ["WORKSHEET_MESSENGER_TOKEN"], account="personal",
+            expected_email=email, enforce_account_class=False, timeout=12,
+        )
         self.identity = self.client.identity()
         self.client_error = MessengerError
-        self.chat = valid_chat(chat)
         self.render = render_message
         self.thread_chat_id = thread_chat_id
 

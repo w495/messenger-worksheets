@@ -1,366 +1,381 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+# shellcheck enable=all
+# shfmt -p -s -i 2 -kp -sr -ci -d
 
+# Helper запускается через sudo только с одной точной операцией.
+# Фиксированный PATH и сброс PYTHONPATH исключают подмену команд
+# и Python-модулей через окружение вызывающего пользователя.
+set -eu
+umask 077
 export PATH=/usr/local/bin:/usr/bin:/bin
 unset PYTHONPATH
 
-if [[ ${EUID} -ne 0 || $# -ne 1 ]]; then
-    echo "Usage: sudo worksheet-admin <operation>" >&2
-    exit 64
+effective_uid=$(id -u)
+if [ "${effective_uid}" -ne 0 ] || [ "$#" -ne 1 ]; then
+  echo 'Usage: sudo worksheet-admin <operation>' >&2
+  exit 64
 fi
 
-python=/opt/messenger-worksheets/venv/bin/python
-admin=/opt/messenger-worksheets/admin
+base=/opt/messenger-worksheets
+python=${base}/venv/bin/python
+admin=${base}/admin
+app=${base}/app
+config=/etc/messenger-worksheets
+api_env=${config}/gateway-api.env
+local_env=${config}/gateway-local-user.env
+sandbox_env=${config}/gateway-sandbox-admin.env
+bot_env=${config}/gateway-bot.env
+worker_api=worksheet-worker.service
+worker_local=worksheet-worker-local-user.service
+worker_sandbox=worksheet-worker-sandbox-admin.service
+gateway_api=worksheet-gateway-api.service
+gateway_local=worksheet-gateway-local-user.service
+gateway_sandbox=worksheet-gateway-sandbox-admin.service
+gateway_bot=worksheet-gateway-bot.service
 
-# Атомарно меняет только selector Messenger-клиента в одном root-owned env.
-# Содержимое env, включая OAuth и transport token, никогда не печатается;
-# временный файл создаётся в том же каталоге, получает mode 0600 и заменяет
-# исходник через rename. Неизвестное значение backend отклоняется до записи.
-set_gateway_backend() {
-    local environment=$1 backend=$2 temporary
-    if [[ ${backend} != legacy && ${backend} != cleanroom ]]; then
-        echo "Unsupported Messenger backend." >&2
-        return 64
+# Любое временное содержимое env остаётся доступным только root.
+# trap 0 работает в POSIX sh; сигналы завершают helper через тот же
+# обработчик. После успешного rename путь очищается, чтобы cleanup
+# не затронул уже установленный файл.
+temporary=''
+cleanup() {
+  cleanup_status=$?
+  if [ -n "${temporary}" ]; then
+    rm -f -- "${temporary}"
+  fi
+  trap - 0
+  exit "${cleanup_status}"
+}
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Совместимая операция активации записывает единственное допустимое
+# значение selector. Остальное содержимое env, включая OAuth,
+# не выводится и заменяется атомарно в том же каталоге.
+set_gateway_cleanroom() {
+  environment=$1
+  temporary=$(mktemp "${environment}.XXXXXX")
+  awk '
+    BEGIN { found = 0 }
+    /^WORKSHEET_MESSENGER_BACKEND=/ {
+      print "WORKSHEET_MESSENGER_BACKEND=cleanroom"
+      found = 1
+      next
+    }
+    { print }
+    END {
+      if (!found) print "WORKSHEET_MESSENGER_BACKEND=cleanroom"
+    }
+  ' "${environment}" > "${temporary}"
+  chmod 0600 "${temporary}"
+  chown root:root "${temporary}"
+  mv -f -- "${temporary}" "${environment}"
+  temporary=''
+}
+
+# Read-only проверка аккаунта и чата завершается до переключения
+# службы. Все места вызова передают только фиксированные env-пути.
+messenger_probe() {
+  PYTHONPATH=${app} "${python}" "${admin}/check_messenger.py" \
+    --environment-file "$1" --backend cleanroom
+}
+
+# Smoke-проверки получают только заранее выбранный профиль и флаги
+# из case ниже. exec передаёт их код возврата вызывающему sudo.
+smoke_worker() {
+  PYTHONPATH=${app} exec "${python}" \
+    "${admin}/smoke_test_worker.py" "$@"
+}
+
+case "$1" in
+  # Статус не раскрывает env: systemctl печатает только свойства служб.
+  status)
+    systemctl show "${worker_api}" "${worker_local}" \
+      "${worker_sandbox}" \
+      "${gateway_api}" "${gateway_local}" "${gateway_sandbox}" \
+      "${gateway_bot}" worksheet-gateway.service \
+      -p Id -p LoadState -p ActiveState -p SubState \
+      -p UnitFileState --no-pager
+    ;;
+  diagnose-sandbox)
+    export PYTHONPATH="${app}"
+    exec "${python}" "${admin}/diagnose_sandbox.py"
+    ;;
+  diagnose-openai)
+    exec "${python}" "${admin}/diagnose_openai.py"
+    ;;
+  doctor-openai)
+    exec "${python}" "${admin}/doctor_openai.py"
+    ;;
+  check-messenger-api | check-messenger-api-cleanroom)
+    messenger_probe "${api_env}"
+    ;;
+  check-messenger-local)
+    messenger_probe "${local_env}"
+    ;;
+  check-messenger-local-cleanroom)
+    messenger_probe "${sandbox_env}"
+    ;;
+  # Каждая цепочка проверяется собственным CA. Публичные ключи
+  # извлекаются отдельной командой: сбой OpenSSL не теряется
+  # в pipeline, как это произошло бы без непереносимого pipefail.
+  # Сами ключи и fingerprint не попадают в журнал.
+  check-tls-isolation)
+    public_keys='|'
+    temporary=$(mktemp)
+    for profile in api local-user sandbox-admin; do
+      case "${profile}" in
+        api) cert_file=${config}/worker/server.crt ;;
+        *) cert_file=${config}/${profile}/server.crt ;;
+      esac
+      ca_file=${config}/ca-${profile}.crt
+      openssl verify -x509_strict -CAfile "${ca_file}" \
+        -purpose sslserver "${cert_file}" > /dev/null
+      openssl x509 -in "${cert_file}" -pubkey -noout > "${temporary}"
+      fingerprint=$(sha256sum "${temporary}")
+      fingerprint=${fingerprint%% *}
+      case "${public_keys}" in
+        *"|${fingerprint}|"*)
+          echo 'TLS profiles reuse a server public key.' >&2
+          exit 1
+          ;;
+        *) : ;;
+      esac
+      public_keys=${public_keys}${fingerprint}'|'
+    done
+    if openssl verify -CAfile "${config}/ca-api.crt" \
+      "${config}/sandbox-admin/server.crt" > /dev/null 2>&1 ||
+      openssl verify -CAfile "${config}/ca-sandbox-admin.crt" \
+        "${config}/worker/server.crt" > /dev/null 2>&1; then
+      echo 'TLS trust roots are not isolated.' >&2
+      exit 1
     fi
+    echo 'tls_profile_isolation_ok profiles=3'
+    ;;
+  check-bot)
+    export PYTHONPATH="${app}"
+    exec "${python}" "${admin}/check_bot.py" \
+      --environment-file "${bot_env}"
+    ;;
+  # Device-auth выполняется с HOME того UID, которому принадлежит
+  # профиль Codex. Основной аккаунт и sandbox хранят сессии отдельно.
+  login-codex)
+    exec "${python}" "${admin}/login_codex.py"
+    ;;
+  login-sandbox-admin)
+    account_home=/var/lib/messenger-worksheets-chat-admin
+    exec /usr/bin/setpriv --reuid=worksheet-chat-admin \
+      --regid=worksheet-chat-admin --clear-groups -- \
+      /usr/bin/env HOME="${account_home}" \
+      PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
+      /usr/local/bin/codex login --device-auth
+    ;;
+  smoke-models)
+    export PYTHONPATH="${app}"
+    exec "${python}" "${admin}/smoke_test_commands.py" --models-only
+    ;;
+  smoke-controls)
+    export PYTHONPATH="${app}"
+    exec "${python}" "${admin}/smoke_test_commands.py"
+    ;;
+  smoke-api)
+    smoke_worker --environment-file "${api_env}"
+    ;;
+  smoke-local)
+    smoke_worker --environment-file "${local_env}"
+    ;;
+  smoke-sandbox)
+    smoke_worker --environment-file "${sandbox_env}"
+    ;;
+  smoke-sandbox-task)
+    smoke_worker --environment-file "${sandbox_env}" --task
+    ;;
+  smoke-sandbox-link)
+    smoke_worker --environment-file "${sandbox_env}" --external-link
+    ;;
+  # Python glob одинаково обрабатывает отсутствие и несколько
+  # совпадений во всех оболочках. Путь поиска жёстко задан helper,
+  # бинарник должен быть единственным и исполняемым.
+  set-native-codex)
+    binary=$(
+             "${python}" - << 'PY'
+import glob
+import os
+
+prefix = "/usr/local/lib/node_modules/@openai/codex/node_modules/"
+pattern = prefix + "@openai/codex-*/vendor/*/bin/codex"
+candidates = glob.glob(pattern)
+if len(candidates) != 1 or not os.access(candidates[0], os.X_OK):
+    raise SystemExit("Expected exactly one native Codex binary.")
+print(candidates[0])
+PY
+    )
+    environment=${config}/worker.env
     temporary=$(mktemp "${environment}.XXXXXX")
-    if ! awk -v backend="${backend}" '
-        BEGIN { found = 0 }
-        /^WORKSHEET_MESSENGER_BACKEND=/ {
-            print "WORKSHEET_MESSENGER_BACKEND=" backend
-            found = 1
-            next
-        }
-        { print }
-        END { if (!found) print "WORKSHEET_MESSENGER_BACKEND=" backend }
-    ' "${environment}" > "${temporary}"; then
-        rm -f -- "${temporary}"
-        return 1
-    fi
+    awk -v binary="${binary}" '
+      BEGIN { replaced = 0 }
+      /^WORKSHEET_CODEX_BINARY=/ {
+        print "WORKSHEET_CODEX_BINARY=" binary
+        replaced = 1
+        next
+      }
+      { print }
+      END { if (!replaced) exit 2 }
+    ' "${environment}" > "${temporary}"
     chmod 0600 "${temporary}"
     chown root:root "${temporary}"
     mv -f -- "${temporary}" "${environment}"
-}
-
-case $1 in
-    status)
-        systemctl show worksheet-worker.service worksheet-worker-local-user.service \
-            worksheet-worker-sandbox-admin.service \
-            worksheet-gateway-api.service worksheet-gateway-local-user.service \
-            worksheet-gateway-sandbox-admin.service \
-            worksheet-gateway-bot.service \
-            worksheet-gateway.service \
-            -p Id -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager
-        ;;
-    diagnose-sandbox)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/diagnose_sandbox.py"
-        ;;
-    diagnose-openai)
-        exec "${python}" "${admin}/diagnose_openai.py"
-        ;;
-    doctor-openai)
-        exec "${python}" "${admin}/doctor_openai.py"
-        ;;
-    check-messenger-api)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/check_messenger.py" \
-            --environment-file /etc/messenger-worksheets/gateway-api.env
-        ;;
-    check-messenger-local)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/check_messenger.py" \
-            --environment-file /etc/messenger-worksheets/gateway-local-user.env
-        ;;
-    check-messenger-api-cleanroom)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/check_messenger.py" \
-            --environment-file /etc/messenger-worksheets/gateway-api.env \
-            --backend cleanroom
-        ;;
-    check-messenger-local-cleanroom)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/check_messenger.py" \
-            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env \
-            --backend cleanroom
-        ;;
-    # Проверяет каждую цепочку собственным CA, уникальность публичных ключей и
-    # обязательный провал cross-profile verify. Private keys не читаются и
-    # fingerprint не печатаются, поэтому операция безопасна для журнала.
-    check-tls-isolation)
-        declare -A public_keys=()
-        for spec in \
-            api:/etc/messenger-worksheets/ca-api.crt:/etc/messenger-worksheets/worker/server.crt \
-            local:/etc/messenger-worksheets/ca-local-user.crt:/etc/messenger-worksheets/local-user/server.crt \
-            sandbox:/etc/messenger-worksheets/ca-sandbox-admin.crt:/etc/messenger-worksheets/sandbox-admin/server.crt; do
-            IFS=: read -r profile ca_file cert_file <<< "${spec}"
-            openssl verify -x509_strict -CAfile "${ca_file}" -purpose sslserver \
-                "${cert_file}" >/dev/null
-            fingerprint=$(openssl x509 -in "${cert_file}" -pubkey -noout | sha256sum | awk '{print $1}')
-            if [[ -n ${public_keys[${fingerprint}]:-} ]]; then
-                echo "TLS profiles reuse a server public key." >&2
-                exit 1
-            fi
-            public_keys[${fingerprint}]=${profile}
-        done
-        if openssl verify -CAfile /etc/messenger-worksheets/ca-api.crt \
-                /etc/messenger-worksheets/sandbox-admin/server.crt >/dev/null 2>&1 \
-            || openssl verify -CAfile /etc/messenger-worksheets/ca-sandbox-admin.crt \
-                /etc/messenger-worksheets/worker/server.crt >/dev/null 2>&1; then
-            echo "TLS trust roots are not isolated." >&2
-            exit 1
-        fi
-        echo "tls_profile_isolation_ok profiles=3"
-        ;;
-    check-bot)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/check_bot.py" \
-            --environment-file /etc/messenger-worksheets/gateway-bot.env
-        ;;
-    login-codex)
-        exec "${python}" "${admin}/login_codex.py"
-        ;;
-    login-sandbox-admin)
-        account_home=/var/lib/messenger-worksheets-chat-admin
-        exec /usr/bin/setpriv --reuid=worksheet-chat-admin --regid=worksheet-chat-admin \
-            --clear-groups -- /usr/bin/env HOME="${account_home}" \
-            PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
-            /usr/local/bin/codex login --device-auth
-        ;;
-    smoke-models)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/smoke_test_commands.py" --models-only
-        ;;
-    smoke-controls)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/smoke_test_commands.py"
-        ;;
-    smoke-api)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/smoke_test_worker.py" \
-            --environment-file /etc/messenger-worksheets/gateway-api.env
-        ;;
-    smoke-local)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/smoke_test_worker.py" \
-            --environment-file /etc/messenger-worksheets/gateway-local-user.env
-        ;;
-    smoke-sandbox)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/smoke_test_worker.py" \
-            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env
-        ;;
-    smoke-sandbox-task)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/smoke_test_worker.py" \
-            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env --task
-        ;;
-    smoke-sandbox-link)
-        export PYTHONPATH=/opt/messenger-worksheets/app
-        exec "${python}" "${admin}/smoke_test_worker.py" \
-            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env \
-            --external-link
-        ;;
-    set-native-codex)
-        shopt -s nullglob
-        candidates=(/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-*/vendor/*/bin/codex)
-        if [[ ${#candidates[@]} -ne 1 || ! -x ${candidates[0]} ]]; then
-            echo "Expected exactly one native Codex binary." >&2
-            exit 1
-        fi
-        environment=/etc/messenger-worksheets/worker.env
-        temporary=$(mktemp /etc/messenger-worksheets/worker.env.XXXXXX)
-        trap 'rm -f -- "${temporary}"' EXIT
-        awk -v binary="${candidates[0]}" '
-            BEGIN { replaced = 0 }
-            /^WORKSHEET_CODEX_BINARY=/ { print "WORKSHEET_CODEX_BINARY=" binary; replaced = 1; next }
-            { print }
-            END { if (!replaced) exit 2 }
-        ' "${environment}" > "${temporary}"
-        chmod 0600 "${temporary}"
-        chown root:root "${temporary}"
-        mv -f -- "${temporary}" "${environment}"
-        trap - EXIT
-        echo "Worker configured to use the native Codex binary."
-        ;;
-    set-profile-gpt-5.3-codex-high)
-        environment=/etc/messenger-worksheets/worker.env
-        temporary=$(mktemp /etc/messenger-worksheets/worker.env.XXXXXX)
-        trap 'rm -f -- "${temporary}"' EXIT
-        awk '
-            BEGIN { model = 0; effort = 0 }
-            /^WORKSHEET_CODEX_MODEL=/ { print "WORKSHEET_CODEX_MODEL=gpt-5.3-codex"; model = 1; next }
-            /^WORKSHEET_CODEX_REASONING_EFFORT=/ { print "WORKSHEET_CODEX_REASONING_EFFORT=high"; effort = 1; next }
-            { print }
-            END {
-                if (!model) print "WORKSHEET_CODEX_MODEL=gpt-5.3-codex"
-                if (!effort) print "WORKSHEET_CODEX_REASONING_EFFORT=high"
-            }
-        ' "${environment}" > "${temporary}"
-        chmod 0600 "${temporary}"
-        chown root:root "${temporary}"
-        mv -f -- "${temporary}" "${environment}"
-        trap - EXIT
-        echo "Worker profile configured as gpt-5.3-codex with reasoning high."
-        ;;
-    start-worker-api)
-        systemctl start worksheet-worker.service
-        ;;
-    restart-worker-api)
-        systemctl restart worksheet-worker.service
-        ;;
-    stop-worker-api)
-        systemctl stop worksheet-worker.service
-        ;;
-    start-worker-local)
-        systemctl start worksheet-worker-local-user.service
-        ;;
-    restart-worker-local)
-        systemctl restart worksheet-worker-local-user.service
-        ;;
-    stop-worker-local)
-        systemctl stop worksheet-worker-local-user.service
-        ;;
-    start-worker-sandbox)
-        systemctl start worksheet-worker-sandbox-admin.service
-        ;;
-    restart-worker-sandbox)
-        systemctl restart worksheet-worker-sandbox-admin.service
-        ;;
-    stop-worker-sandbox)
-        systemctl stop worksheet-worker-sandbox-admin.service
-        ;;
-    start-gateway-api)
-        systemctl start worksheet-gateway-api.service
-        ;;
-    stop-gateway-api)
-        systemctl stop worksheet-gateway-api.service
-        ;;
-    start-gateway-local)
-        systemctl start worksheet-gateway-local-user.service
-        ;;
-    stop-gateway-local)
-        systemctl stop worksheet-gateway-local-user.service
-        ;;
-    start-gateway-sandbox)
-        systemctl start worksheet-gateway-sandbox-admin.service
-        ;;
-    stop-gateway-sandbox)
-        systemctl stop worksheet-gateway-sandbox-admin.service
-        ;;
-    activate-cleanroom-api)
-        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_messenger.py" \
-            --environment-file /etc/messenger-worksheets/gateway-api.env \
-            --backend cleanroom
-        set_gateway_backend /etc/messenger-worksheets/gateway-api.env cleanroom
-        systemctl restart worksheet-gateway-api.service
-        ;;
-    rollback-legacy-api)
-        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_messenger.py" \
-            --environment-file /etc/messenger-worksheets/gateway-api.env \
-            --backend legacy
-        set_gateway_backend /etc/messenger-worksheets/gateway-api.env legacy
-        systemctl restart worksheet-gateway-api.service
-        ;;
-    activate-cleanroom-sandbox)
-        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_messenger.py" \
-            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env \
-            --backend cleanroom
-        set_gateway_backend /etc/messenger-worksheets/gateway-sandbox-admin.env cleanroom
-        systemctl restart worksheet-gateway-sandbox-admin.service
-        ;;
-    rollback-legacy-sandbox)
-        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_messenger.py" \
-            --environment-file /etc/messenger-worksheets/gateway-sandbox-admin.env \
-            --backend legacy
-        set_gateway_backend /etc/messenger-worksheets/gateway-sandbox-admin.env legacy
-        systemctl restart worksheet-gateway-sandbox-admin.service
-        ;;
-    start-gateway-bot)
-        systemctl start worksheet-gateway-bot.service
-        ;;
-    restart-gateway-bot)
-        systemctl restart worksheet-gateway-bot.service
-        ;;
-    stop-gateway-bot)
-        systemctl stop worksheet-gateway-bot.service
-        ;;
-    activate-bot)
-        PYTHONPATH=/opt/messenger-worksheets/app "${python}" "${admin}/check_bot.py" \
-            --environment-file /etc/messenger-worksheets/gateway-bot.env
-        systemctl stop worksheet-gateway-api.service worksheet-gateway-sandbox-admin.service
-        systemctl start worksheet-gateway-bot.service
-        ;;
-    rollback-userbot)
-        systemctl stop worksheet-gateway-bot.service
-        systemctl start worksheet-gateway-api.service worksheet-gateway-sandbox-admin.service
-        ;;
-    activate-sandbox)
-        systemctl stop worksheet-gateway-local-user.service
-        systemctl start worksheet-worker-sandbox-admin.service worksheet-gateway-sandbox-admin.service
-        ;;
-    rollback-local)
-        systemctl stop worksheet-gateway-sandbox-admin.service
-        systemctl start worksheet-worker-local-user.service worksheet-gateway-local-user.service
-        ;;
-    start-api-instance)
-        systemctl start worksheet-worker.service worksheet-gateway-api.service
-        ;;
-    stop-api-instance)
-        systemctl stop worksheet-gateway-api.service worksheet-worker.service
-        ;;
-    start-local-instance)
-        systemctl start worksheet-worker-local-user.service worksheet-gateway-local-user.service
-        ;;
-    stop-local-instance)
-        systemctl stop worksheet-gateway-local-user.service worksheet-worker-local-user.service
-        ;;
-    enable-instances)
-        systemctl enable worksheet-worker.service worksheet-worker-local-user.service \
-            worksheet-gateway-api.service worksheet-gateway-local-user.service
-        ;;
-    enable-sandbox-instance)
-        systemctl disable worksheet-gateway-local-user.service worksheet-worker-local-user.service
-        systemctl enable worksheet-worker-sandbox-admin.service worksheet-gateway-sandbox-admin.service
-        ;;
-    enable-local-instance)
-        systemctl disable worksheet-gateway-sandbox-admin.service worksheet-worker-sandbox-admin.service
-        systemctl enable worksheet-worker-local-user.service worksheet-gateway-local-user.service
-        ;;
-    enable-bot-instance)
-        systemctl disable worksheet-gateway-api.service worksheet-gateway-local-user.service \
-            worksheet-gateway-sandbox-admin.service
-        systemctl enable worksheet-worker.service worksheet-worker-sandbox-admin.service \
-            worksheet-gateway-bot.service
-        ;;
-    logs-worker-api)
-        journalctl -u worksheet-worker.service -n 100 --no-pager
-        ;;
-    logs-worker-local)
-        journalctl -u worksheet-worker-local-user.service -n 100 --no-pager
-        ;;
-    logs-worker-sandbox)
-        journalctl -u worksheet-worker-sandbox-admin.service -n 100 --no-pager
-        ;;
-    logs-gateway-api)
-        journalctl -u worksheet-gateway-api.service -n 100 --no-pager
-        ;;
-    logs-gateway-local)
-        journalctl -u worksheet-gateway-local-user.service -n 100 --no-pager
-        ;;
-    logs-gateway-sandbox)
-        journalctl -u worksheet-gateway-sandbox-admin.service -n 100 --no-pager
-        ;;
-    logs-gateway-bot)
-        journalctl -u worksheet-gateway-bot.service -n 100 --no-pager
-        ;;
-    revoke)
-        rm -f -- /etc/sudoers.d/messenger-worksheets-admin
-        rm -rf -- /opt/messenger-worksheets/admin
-        rm -f -- /usr/local/sbin/worksheet-admin
-        echo "Restricted worksheet-admin access revoked."
-        ;;
-    *)
-        echo "Unsupported worksheet-admin operation." >&2
-        exit 64
-        ;;
+    temporary=''
+    echo 'Worker configured to use the native Codex binary.'
+    ;;
+  # Изменяется только фиксированная пара model/effort. Другие
+  # параметры и секреты сохраняются без печати содержимого env.
+  set-profile-gpt-5.3-codex-high)
+    environment=${config}/worker.env
+    temporary=$(mktemp "${environment}.XXXXXX")
+    awk '
+      BEGIN { model = 0; effort = 0 }
+      /^WORKSHEET_CODEX_MODEL=/ {
+        print "WORKSHEET_CODEX_MODEL=gpt-5.3-codex"
+        model = 1
+        next
+      }
+      /^WORKSHEET_CODEX_REASONING_EFFORT=/ {
+        print "WORKSHEET_CODEX_REASONING_EFFORT=high"
+        effort = 1
+        next
+      }
+      { print }
+      END {
+        if (!model) print "WORKSHEET_CODEX_MODEL=gpt-5.3-codex"
+        if (!effort) print "WORKSHEET_CODEX_REASONING_EFFORT=high"
+      }
+    ' "${environment}" > "${temporary}"
+    chmod 0600 "${temporary}"
+    chown root:root "${temporary}"
+    mv -f -- "${temporary}" "${environment}"
+    temporary=''
+    printf '%s %s\n' 'Worker profile configured as' \
+      'gpt-5.3-codex with reasoning high.'
+    ;;
+  # Эти операции меняют только одну заранее определённую службу.
+  # Передать произвольный unit через аргументы helper невозможно.
+  start-worker-api) systemctl start "${worker_api}" ;;
+  restart-worker-api) systemctl restart "${worker_api}" ;;
+  stop-worker-api) systemctl stop "${worker_api}" ;;
+  start-worker-local) systemctl start "${worker_local}" ;;
+  restart-worker-local) systemctl restart "${worker_local}" ;;
+  stop-worker-local) systemctl stop "${worker_local}" ;;
+  start-worker-sandbox) systemctl start "${worker_sandbox}" ;;
+  restart-worker-sandbox) systemctl restart "${worker_sandbox}" ;;
+  stop-worker-sandbox) systemctl stop "${worker_sandbox}" ;;
+  start-gateway-api) systemctl start "${gateway_api}" ;;
+  stop-gateway-api) systemctl stop "${gateway_api}" ;;
+  start-gateway-local) systemctl start "${gateway_local}" ;;
+  stop-gateway-local) systemctl stop "${gateway_local}" ;;
+  start-gateway-sandbox) systemctl start "${gateway_sandbox}" ;;
+  stop-gateway-sandbox) systemctl stop "${gateway_sandbox}" ;;
+  start-gateway-bot) systemctl start "${gateway_bot}" ;;
+  restart-gateway-bot) systemctl restart "${gateway_bot}" ;;
+  stop-gateway-bot) systemctl stop "${gateway_bot}" ;;
+  # Старые команды активации сохранены для установленных sudoers.
+  # Возможности возврата к удалённому клиенту больше нет.
+  activate-cleanroom-api)
+    messenger_probe "${api_env}"
+    set_gateway_cleanroom "${api_env}"
+    systemctl restart "${gateway_api}"
+    ;;
+  activate-cleanroom-sandbox)
+    messenger_probe "${sandbox_env}"
+    set_gateway_cleanroom "${sandbox_env}"
+    systemctl restart "${gateway_sandbox}"
+    ;;
+  # При смене транспорта прежний polling writer останавливается
+  # до запуска нового: один чат не обслуживают два gateway сразу.
+  activate-bot)
+    PYTHONPATH=${app} "${python}" "${admin}/check_bot.py" \
+      --environment-file "${bot_env}"
+    systemctl stop "${gateway_api}" "${gateway_sandbox}"
+    systemctl start "${gateway_bot}"
+    ;;
+  rollback-userbot)
+    systemctl stop "${gateway_bot}"
+    systemctl start "${gateway_api}" "${gateway_sandbox}"
+    ;;
+  activate-sandbox)
+    systemctl stop "${gateway_local}"
+    systemctl start "${worker_sandbox}" "${gateway_sandbox}"
+    ;;
+  rollback-local)
+    systemctl stop "${gateway_sandbox}"
+    systemctl start "${worker_local}" "${gateway_local}"
+    ;;
+  start-api-instance)
+    systemctl start "${worker_api}" "${gateway_api}"
+    ;;
+  stop-api-instance)
+    systemctl stop "${gateway_api}" "${worker_api}"
+    ;;
+  start-local-instance)
+    systemctl start "${worker_local}" "${gateway_local}"
+    ;;
+  stop-local-instance)
+    systemctl stop "${gateway_local}" "${worker_local}"
+    ;;
+  # Автозапуск настраивается отдельно от текущего состояния служб.
+  # Взаимоисключающие варианты отключаются до включения выбранного.
+  enable-instances)
+    systemctl enable "${worker_api}" "${worker_local}" \
+      "${gateway_api}" "${gateway_local}"
+    ;;
+  enable-sandbox-instance)
+    systemctl disable "${gateway_local}" "${worker_local}"
+    systemctl enable "${worker_sandbox}" "${gateway_sandbox}"
+    ;;
+  enable-local-instance)
+    systemctl disable "${gateway_sandbox}" "${worker_sandbox}"
+    systemctl enable "${worker_local}" "${gateway_local}"
+    ;;
+  enable-bot-instance)
+    systemctl disable "${gateway_api}" "${gateway_local}" \
+      "${gateway_sandbox}"
+    systemctl enable "${worker_api}" "${worker_sandbox}" \
+      "${gateway_bot}"
+    ;;
+  # Журналы ограничены последними ста строками указанной службы.
+  logs-worker-api)
+    journalctl -u "${worker_api}" -n 100 --no-pager
+    ;;
+  logs-worker-local)
+    journalctl -u "${worker_local}" -n 100 --no-pager
+    ;;
+  logs-worker-sandbox)
+    journalctl -u "${worker_sandbox}" -n 100 --no-pager
+    ;;
+  logs-gateway-api)
+    journalctl -u "${gateway_api}" -n 100 --no-pager
+    ;;
+  logs-gateway-local)
+    journalctl -u "${gateway_local}" -n 100 --no-pager
+    ;;
+  logs-gateway-sandbox)
+    journalctl -u "${gateway_sandbox}" -n 100 --no-pager
+    ;;
+  logs-gateway-bot)
+    journalctl -u "${gateway_bot}" -n 100 --no-pager
+    ;;
+  # Отзыв выполняется только по явной команде оператора. Обычные
+  # проверки и обновления не удаляют разрешения или сам helper.
+  revoke)
+    rm -f -- /etc/sudoers.d/messenger-worksheets-admin
+    rm -rf -- "${admin}"
+    rm -f -- /usr/local/sbin/worksheet-admin
+    echo 'Restricted worksheet-admin access revoked.'
+    ;;
+  *)
+    echo 'Unsupported worksheet-admin operation.' >&2
+    exit 64
+    ;;
 esac

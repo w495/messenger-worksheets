@@ -97,27 +97,18 @@ def main() -> None:
     backend = config.get("messenger_backend", "cleanroom")
     if not isinstance(expected_email, str):
         raise ValueError("instance config has no expected_email")
-    if backend not in {"legacy", "cleanroom"}:
-        raise ValueError("messenger_backend must be legacy or cleanroom")
-    legacy = read_env(ETC / "gateway.env")
+    if backend != "cleanroom":
+        raise ValueError("messenger_backend must be cleanroom")
     token = getpass("Personal Yandex Messenger OAuth: ")
     if not token or any(char.isspace() for char in token):
         raise ValueError("OAuth is empty or contains whitespace")
 
-    if backend == "legacy":
-        client_dir = Path(legacy["WORKSHEET_MESSENGER_CLIENT_DIR"]).resolve(strict=True)
-        sys.path.insert(0, str(client_dir))
-        from client import MessengerUserClient
-        client_options = {
-            "account": "personal", "expected_email": expected_email, "timeout": 12,
-        }
-    else:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "messenger-worksheets"))
-        from messenger_user_client import MessengerUserClient
-        client_options = {
-            "account": "personal", "expected_email": expected_email,
-            "enforce_account_class": False, "timeout": 12,
-        }
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "messenger-worksheets"))
+    from messenger_user_client import MessengerUserClient
+    client_options = {
+        "account": "personal", "expected_email": expected_email,
+        "enforce_account_class": False, "timeout": 12,
+    }
 
     client = MessengerUserClient(token, **client_options)
     client.identity()

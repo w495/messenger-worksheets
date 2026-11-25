@@ -26,9 +26,7 @@ certificates/
 deployment/instances.local.json
 *.sqlite3-*
 
-# Optional external code and user-supplied artwork are not part of this release
-/messenger-client/client.py
-/messenger-client/transport.py
+# User-supplied artwork is not part of this release
 /assets/bot-avatar.png
 
 # Editors and operating systems

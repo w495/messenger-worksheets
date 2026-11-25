@@ -11,7 +11,6 @@ from pathlib import Path
 import pwd
 import secrets
 import stat
-import sys
 from tempfile import NamedTemporaryFile
 import tomllib
 import uuid
@@ -217,8 +216,8 @@ def main() -> None:
     instances = config.get("instances")
     if not isinstance(expected_email, str) or not isinstance(instances, dict):
         raise ValueError("invalid instance config")
-    if messenger_backend not in {"legacy", "cleanroom"}:
-        raise ValueError("messenger_backend must be legacy or cleanroom")
+    if messenger_backend != "cleanroom":
+        raise ValueError("messenger_backend must be cleanroom")
     if set(instances) != {"api", "local_user"}:
         raise ValueError("instance config must contain api and local_user")
     if bot is not None and (
@@ -240,26 +239,13 @@ def main() -> None:
         messenger_token = read_token_file(Path(token_file), "w495")
     else:
         messenger_token = legacy["WORKSHEET_MESSENGER_TOKEN"]
-    client_dir = Path(legacy.get(
-        "WORKSHEET_MESSENGER_CLIENT_DIR", "/opt/messenger-worksheets/messenger-client",
-    ))
-    if messenger_backend == "legacy":
-        client_dir = client_dir.resolve(strict=True)
-        sys.path.insert(0, str(client_dir))
-        from client import MessengerUserClient
-        client_options = {
-            "account": "personal",
-            "expected_email": expected_email,
-            "timeout": 12,
-        }
-    else:
-        from messenger_user_client import MessengerUserClient
-        client_options = {
-            "account": "personal",
-            "expected_email": expected_email,
-            "enforce_account_class": False,
-            "timeout": 12,
-        }
+    from messenger_user_client import MessengerUserClient
+    client_options = {
+        "account": "personal",
+        "expected_email": expected_email,
+        "enforce_account_class": False,
+        "timeout": 12,
+    }
 
     messenger = MessengerUserClient(messenger_token, **client_options)
     messenger.identity()
@@ -301,7 +287,6 @@ def main() -> None:
 
     common_gateway = {
         "WORKSHEET_MESSENGER_BACKEND": messenger_backend,
-        "WORKSHEET_MESSENGER_CLIENT_DIR": str(client_dir),
         "WORKSHEET_MESSENGER_TOKEN": messenger_token,
         "WORKSHEET_MESSENGER_EMAIL": expected_email,
         "WORKSHEET_REPLY_IN_THREADS": "true",

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
-import sys
 
 from messenger_codex.bridge import Messenger, valid_chat
 
@@ -14,8 +12,8 @@ EMAIL = os.environ["WORKSHEET_MESSENGER_EMAIL"].strip().casefold()
 if "@" not in EMAIL or len(EMAIL) > 254:
     raise ValueError("invalid expected Messenger email")
 BACKEND = os.environ.get("WORKSHEET_MESSENGER_BACKEND", "cleanroom")
-if BACKEND not in {"legacy", "cleanroom"}:
-    raise ValueError("WORKSHEET_MESSENGER_BACKEND must be legacy or cleanroom")
+if BACKEND != "cleanroom":
+    raise ValueError("WORKSHEET_MESSENGER_BACKEND must be cleanroom")
 
 
 class PersonalIdentityError(ValueError):
@@ -24,35 +22,13 @@ class PersonalIdentityError(ValueError):
 
 class PersonalMessenger(Messenger):
     def __init__(self) -> None:
-        """Подключить выбранный backend только к ожидаемой персональной учётной записи и чату.
+        """Привязать собственный клиент к настроенным EMAIL и CHAT.
 
-        Параметры: нет.
-        Результат: Адаптер Messenger, привязанный к глобальным CHAT/EMAIL и выбранному backend.
-        Исключения: KeyError/ImportError/FileNotFoundError конфигурации/backend; ошибки клиента identity, включая несовпадение expected_email.
-        Побочные эффекты: Может resolve legacy dir и изменить sys.path; импортирует backend, читает token env, создаёт client и запрашивает identity.
-        Безопасность: Backend ограничен module-level allowlist; expected_email передаётся клиенту fail-closed, token не журналируется и chat уже канонизирован."""
-        if BACKEND == "legacy":
-            client_dir = Path(os.environ["WORKSHEET_MESSENGER_CLIENT_DIR"]).resolve(strict=True)
-            sys.path.insert(0, str(client_dir))
-            from client import (
-                MessengerError, MessengerUserClient, render_message, thread_chat_id,
-            )
-            client_options = {"account": "personal", "expected_email": EMAIL, "timeout": 12}
-        else:
-            from messenger_user_client import (
-                MessengerError, MessengerUserClient, render_message, thread_chat_id,
-            )
-            client_options = {
-                "account": "personal",
-                "expected_email": EMAIL,
-                "enforce_account_class": False,
-                "timeout": 12,
-            }
+        Читает OAuth из окружения, затем проверяет личность через сеть.
+        Несовпадение email блокирует работу до чтения сообщений. Произвольные
+        модули и внешние каталоги клиента не загружаются.
 
-        token = os.environ["WORKSHEET_MESSENGER_TOKEN"]
-        self.client = MessengerUserClient(token, **client_options)
-        self.identity = self.client.identity()
-        self.client_error = MessengerError
-        self.chat = CHAT
-        self.render = render_message
-        self.thread_chat_id = thread_chat_id
+        Исключения конфигурации и проверки личности передаются вызывающему
+        коду; токен не включается в диагностику.
+        """
+        super().__init__(CHAT)

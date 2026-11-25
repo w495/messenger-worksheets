@@ -184,7 +184,7 @@ class ModelTimeoutTest(unittest.TestCase):
             prefix, source = source.split('} > "${' + marker + '}"', 1)
             block = prefix.rsplit("{\n", 1)[1]
             output = subprocess.run(
-                ["bash", "-c", block], check=True, capture_output=True, text=True, env={},
+                ["sh", "-c", block], check=True, capture_output=True, text=True, env={},
             ).stdout
             generated = dict(line.split("=", 1) for line in output.splitlines())
             with self.subTest(profile=marker):

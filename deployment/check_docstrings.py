@@ -9,7 +9,7 @@ import re
 import sys
 
 
-ROOTS = ("messenger-client", "messenger-worksheets", "deployment", "tests")
+ROOTS = ("messenger-worksheets", "deployment", "tests")
 RUSSIAN = re.compile(r"[А-Яа-яЁё]")
 
 
@@ -24,7 +24,7 @@ def python_files(repository: Path) -> tuple[Path, ...]:
 
     Побочные эффекты:
         Функция только читает метаданные каталогов и не открывает секретные
-        env-файлы: область обхода ограничена четырьмя публичными корнями.
+        env-файлы: область обхода ограничена тремя публичными корнями.
 
     Инварианты безопасности:
         Обход не выходит за пределы ``ROOTS`` и никогда не начинается от HOME.
