@@ -31,7 +31,9 @@ ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectSystem=strict
 ProtectProc=invisible
-ProcSubset=pid
+# bwrap читает /proc/sys/kernel/overflowuid при создании user namespace.
+# ProtectKernelTunables сохраняет /proc/sys только для чтения.
+ProcSubset=all
 InaccessiblePaths=-/data -/mnt -/media -/srv
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK

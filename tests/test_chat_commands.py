@@ -62,10 +62,13 @@ class ChatCommandsTest(unittest.TestCase):
             ("/model gpt-6.2-sol high", "model"), ("**/plan** explain", "plan"),
             ("`/review inspect files`", "review"),
             ("/models", "models"), ("**/models** task", "models"),
+            ("/effort high", "effort"), ("**/effort** task ultra", "effort"),
+            ("`/efforts`", "efforts"), ("/* comment */ /EFFORTS chat", "efforts"),
+            ("# people\n/effort minimal", "effort"),
         ):
             with self.subTest(text=text):
                 self.assertEqual(chat_command(text), name)
-        for text in ("/stop all", "say /stop", "> /stop", "# /stop", "// /status", "/stopper", "https://example.test/stop"):
+        for text in ("/stop all", "say /stop", "> /stop", "# /stop", "// /status", "/stopper", "https://example.test/stop", "/effortless", "/efforts-extra", "> /effort high", "# /efforts"):
             with self.subTest(text=text):
                 self.assertIsNone(chat_command(text))
 
@@ -190,7 +193,7 @@ class ChatCommandsTest(unittest.TestCase):
         """Справка перечисляет реализованные команды и значения remote worker."""
         self.command("/help")
         reply = self.bridge.messenger.send.call_args.args[1]
-        for name in ("task", "stop", "status", "reset", "help", "model", "plan", "review"):
+        for name in ("task", "stop", "status", "reset", "help", "model", "models", "effort", "efforts", "plan", "review"):
             self.assertIn("/" + name, reply)
         self.assertIn("configured-model", reply)
         self.assertIn("reasoning_effort=high", reply)
@@ -236,6 +239,119 @@ class ChatCommandsTest(unittest.TestCase):
         self.assertEqual(first, {"model": "old"})
         self.assertEqual(replay, first)
         self.assertEqual(following, {"model": "new"})
+
+    def test_effort_preserves_explicit_models_and_is_idempotent_without_worker_calls(self):
+        """Изменение effort сохраняет разные выбранные модели, replay не делает новых запросов."""
+        self.command("/model chat chosen-chat low", stamp=190)
+        self.command("/model task chosen-task medium", stamp=191)
+        self.bridge._worker_capabilities.reset_mock()
+        self.command("/effort high")
+        self.assertEqual(self.bridge._model_options(100, False), {"model": "chosen-chat", "reasoning_effort": "high"})
+        self.assertEqual(self.bridge._model_options(100, True), {"model": "chosen-task", "reasoning_effort": "high"})
+        self.assertEqual(self.bridge._model_options(101, False), {})
+        sent = self.bridge.messenger.send.call_count
+        self.command("/effort high")
+        self.assertEqual(self.bridge.messenger.send.call_count, sent)
+        self.bridge._worker_capabilities.assert_not_called()
+        self.bridge._worker_models.assert_not_called()
+        self.bridge._draft.assert_not_called()
+        self.bridge._task.assert_not_called()
+
+    def test_effort_resolves_defaults_independently_and_commits_both_routes(self):
+        """Без override API и native сохраняют собственные реальные defaults, не одну общую модель."""
+        self.bridge._worker_capabilities.side_effect = [
+            {"model": "api-default", "reasoning_effort": "medium"},
+            {"model": "native-default", "reasoning_effort": "high"},
+        ]
+        with patch.dict(os.environ, {"WORKSHEET_CODEX_WORKER_URL": "https://api.invalid/v1/codex-worksheet-jobs",
+                                    "WORKSHEET_TASK_WORKER_URL": "https://task.invalid/v1/codex-worksheet-jobs",
+                                    "WORKSHEET_TASK_WORKER_TRANSPORT_TOKEN": "synthetic", "WORKSHEET_TASK_WORKER_CA": "/synthetic/ca"}):
+            self.command("/effort ultra")
+        self.assertEqual(self.bridge._model_options(100, False), {"model": "api-default", "reasoning_effort": "ultra"})
+        self.assertEqual(self.bridge._model_options(100, True), {"model": "native-default", "reasoning_effort": "ultra"})
+        self.assertEqual([call.args[0] for call in self.bridge._worker_capabilities.call_args_list],
+                         ["https://api.invalid/v1/codex-worksheet-jobs", "https://task.invalid/v1/codex-worksheet-jobs"])
+        self.command("/effort ultra")
+        self.assertEqual(self.bridge._worker_capabilities.call_count, 2)
+        self.assertEqual(self.bridge.messenger.send.call_count, 1)
+        self.bridge._worker_models.assert_not_called()
+
+    def test_effort_unknown_default_or_endpoint_failure_does_not_partially_update(self):
+        """Сбой второго маршрута оставляет первый без override и скрывает исходную диагностику."""
+        for stamp, second in enumerate(({}, {"model": None}, {"model": "unsafe\nmodel"}, URLError("PRIVATE secret")), 200):
+            self.bridge._worker_capabilities.side_effect = [{"model": "api-default"}, second]
+            self.command("/effort high", stamp=stamp)
+            self.assertEqual(self.bridge.db.execute("SELECT * FROM chat_models").fetchall(), [])
+            text = self.bridge.messenger.send.call_args.args[1]
+            self.assertIn("без изменений", text)
+            self.assertNotIn("PRIVATE", text)
+            self.assertNotIn("unsafe", text)
+        self.bridge._draft.assert_not_called()
+        self.bridge._task.assert_not_called()
+
+    def test_effort_route_only_accepts_all_levels_and_preserves_common_model(self):
+        """Каждый допустимый уровень изменяет только task effort, общий chat остаётся прежним."""
+        self.command("/model selected-model low", stamp=190)
+        for stamp, level in enumerate(("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"), 200):
+            self.command("/effort task " + level, stamp=stamp)
+            self.assertEqual(self.bridge._model_options(100, True), {"model": "selected-model", "reasoning_effort": level})
+            self.assertEqual(self.bridge._model_options(100, False), {"model": "selected-model", "reasoning_effort": "low"})
+        self.bridge._worker_capabilities.assert_not_called()
+
+    def test_effort_rejected_values_and_current_settings_do_not_write_model_rows(self):
+        """Неверные аргументы не обращаются к worker, no-args показывает текущие metadata."""
+        for stamp, value in enumerate(("/effort task", "/effort unknown high", "/effort infinite", "/effort high extra", "/effort $(id)"), 200):
+            self.command(value, stamp=stamp)
+            self.assertIn("Формат", self.bridge.messenger.send.call_args.args[1])
+        self.bridge._worker_capabilities.assert_not_called()
+        self.command("/effort", stamp=210)
+        reply = self.bridge.messenger.send.call_args.args[1]
+        self.assertIn("configured-model", reply)
+        self.assertIn("reasoning_effort=high", reply)
+        self.assertEqual(self.bridge._worker_capabilities.call_count, 2)
+        self.assertEqual(self.bridge.db.execute("SELECT * FROM chat_models").fetchall(), [])
+
+    def test_effort_database_failure_rolls_back_both_route_updates(self):
+        """Ошибка SQLite второго route откатывает уже подготовленную запись первого."""
+        self.command("/model selected low", stamp=190)
+        self.bridge.db.execute("CREATE TRIGGER reject_task BEFORE INSERT ON chat_models WHEN NEW.route=1 BEGIN SELECT RAISE(ABORT, 'synthetic'); END;")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.bridge._effort_command(100, "high")
+        self.assertEqual(self.bridge.db.execute("SELECT route,model,effort FROM chat_models").fetchall(), [(-1, "selected", "low")])
+
+    def test_efforts_explains_all_levels_without_network_or_mutation_and_replays_once(self):
+        """Справка дешёвая: восемь значений, caveat поддержки и ссылка на каталог нужного route."""
+        self.command("/efforts task")
+        text = self.bridge.messenger.send.call_args.args[1]
+        for level in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
+            self.assertIn("• " + level + " —", text)
+        self.assertIn("/models task", text)
+        self.assertIn("зависят от модели", text)
+        self.assertNotIn("автоагент", text)
+        self.assertEqual(self.bridge.db.execute("SELECT * FROM chat_models").fetchall(), [])
+        self.command("/efforts task")
+        self.assertEqual(self.bridge.messenger.send.call_count, 1)
+        self.command("/efforts unknown", stamp=201)
+        self.assertIn("Формат", self.bridge.messenger.send.call_args.args[1])
+        self.bridge._worker_models.assert_not_called()
+        self.bridge._worker_capabilities.assert_not_called()
+        self.bridge._draft.assert_not_called()
+        self.bridge._task.assert_not_called()
+
+    def test_effort_during_active_job_changes_only_next_uuid_options(self):
+        """Polling применяет effort к следующему UUID; replay активного сохраняет исходные опции."""
+        self.command("/model chosen low", stamp=190)
+        initial = self.bridge._begin_job(100, 150, "active-job", True, self.bridge._model_options(100, True))
+        self.bridge.messenger.new_messages.return_value = [(201, {"text": "/effort task high", "author_guid": "human"})]
+        self.bridge._poll_commands(100, 150)
+        updated = self.bridge._model_options(100, True)
+        replay = self.bridge._begin_job(100, 150, "active-job", True, updated)
+        following = self.bridge._begin_job(100, 250, "following-job", True, updated)
+        self.assertEqual(initial, {"model": "chosen", "reasoning_effort": "low"})
+        self.assertEqual(replay, initial)
+        self.assertEqual(following, {"model": "chosen", "reasoning_effort": "high"})
+        self.bridge._draft.assert_not_called()
+        self.bridge._task.assert_not_called()
 
     def test_plan_review_transform_into_explicit_read_only_task_modes(self):
         """Полезные Codex режимы передаются как protocol options, а не обещания модели."""

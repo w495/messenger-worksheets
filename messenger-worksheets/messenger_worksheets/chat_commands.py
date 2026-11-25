@@ -10,7 +10,7 @@ import time
 from messenger_codex.bridge import strip_prompt_comments
 
 
-COMMANDS = frozenset({"stop", "status", "reset", "help", "model", "models", "plan", "review"})
+COMMANDS = frozenset({"stop", "status", "reset", "help", "model", "models", "effort", "efforts", "plan", "review"})
 EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 ACTIVE_STATES = frozenset({"running", "cancelling", "unknown"})
 TERMINAL_STATES = frozenset({"cancelled", "completed", "failed"})
@@ -21,7 +21,8 @@ def parse_chat_command(text: str) -> tuple[str, str] | None:
     """Распознать управляющий префикс после удаления человеческих комментариев.
 
     Принимает только целиком совпавшие /stop, /status, /reset, /help и команды
-    /model, /plan, /review с аргументом. Парные Markdown-обёртки допустимы
+    /model, /models, /effort, /efforts, /plan, /review с необязательным аргументом.
+    Парные Markdown-обёртки допустимы
     вокруг команды или всего сообщения. Цитаты и похожие имена не совпадают.
     Функция не меняет вход и не обращается к сети или состоянию треда.
     """
@@ -30,11 +31,11 @@ def parse_chat_command(text: str) -> tuple[str, str] | None:
         if cleaned.startswith(wrapper) and cleaned.endswith(wrapper):
             cleaned = cleaned[len(wrapper):-len(wrapper)].strip()
             break
-        prefix = re.match(re.escape(wrapper) + r"(/(?:model|models|plan|review))" + re.escape(wrapper), cleaned, re.IGNORECASE)
+        prefix = re.match(re.escape(wrapper) + r"(/(?:model|models|effort|efforts|plan|review))" + re.escape(wrapper), cleaned, re.IGNORECASE)
         if prefix:
             cleaned = prefix[1] + cleaned[prefix.end():]
             break
-    match = re.fullmatch(r"/(stop|status|reset|help|models|model|plan|review)(?:\s+([\s\S]*))?", cleaned, re.IGNORECASE)
+    match = re.fullmatch(r"/(stop|status|reset|help|models|model|efforts|effort|plan|review)(?:\s+([\s\S]*))?", cleaned, re.IGNORECASE)
     if match is None:
         return None
     name, arguments = match[1].lower(), (match[2] or "").strip()
@@ -177,6 +178,86 @@ class ChatCommandMixin:
             + ". Доступность модели проверяется при обращении к provider."
         )
 
+    def _effort_command(self, thread: int, arguments: str) -> str:
+        """Изменить только бюджет размышлений следующих запросов выбранных маршрутов.
+
+        Параметры: thread — текущий тред; arguments — необязательные chat/task
+        и один уровень из EFFORTS. Без аргументов возвращает текущие настройки.
+        Сохраняет явно выбранную модель; при отсутствии override независимо
+        запрашивает реальные defaults нужных worker через capabilities. Сначала
+        разрешает и проверяет все ID, затем одной SQLite-транзакцией записывает
+        route 0/1: частичный сбой не меняет настройки. Ошибки metadata дают
+        безопасный текст без диагностики; ошибки SQLite передаются вызывающему.
+        Каталог, модель и текущие pinned job options команда не вызывает/не меняет.
+        """
+        parts = arguments.split()
+        if not parts:
+            return self._model_settings_text(thread)
+        tasks = (False, True)
+        if parts[0].casefold() in {"chat", "task"}:
+            tasks = (parts.pop(0).casefold() == "task",)
+        if len(parts) != 1 or parts[0] not in EFFORTS:
+            return "Формат: /effort [chat|task] none|minimal|low|medium|high|xhigh|max|ultra. Без аргументов — текущие настройки."
+        effort = parts[0]
+        resolved = []
+        for task in tasks:
+            options = self._model_options(thread, task)
+            model = options.get("model")
+            if model is None:
+                try:
+                    route = self._job_route(task)
+                    metadata = self._worker_capabilities(route.pop("endpoint"), **route)
+                    model = metadata.get("model")
+                except Exception:
+                    model = None
+            if not isinstance(model, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", model) is None:
+                label = "/task" if task else "обычных сообщений"
+                return (
+                    f"Не удалось определить текущую модель для {label}. Настройки сохранены без изменений. "
+                    "Повторите команду после восстановления worker или сначала выберите модель через /model."
+                )
+            resolved.append((task, model))
+        with self.db:
+            for task, model in resolved:
+                self.db.execute(
+                    "INSERT INTO chat_models VALUES(?,?,?,?) ON CONFLICT(thread,route) DO UPDATE SET "
+                    "model=excluded.model,effort=excluded.effort",
+                    (thread, int(task), model, effort),
+                )
+        chosen = "; ".join(("/task" if task else "обычные сообщения") + ": " + model for task, model in resolved)
+        return (
+            f"Для следующих запросов этого треда задан уровень размышлений {effort}. "
+            f"Модели сохранены: {chosen}. Поддержку уровня определяет выбранная модель и провайдер."
+        )
+
+    def _efforts_text(self, arguments: str) -> str:
+        """Перечислить принимаемые уровни и их назначение без HTTP и вызова модели.
+
+        Параметр arguments — пустая строка либо chat/task для ссылки на каталог
+        маршрута. Возвращает статическую русскую справку или usage; настройки,
+        БД и pinned job options не меняет. Названия max/ultra не приравнивает
+        к универсальному бюджету или агентам: смысл и поддерживаемое подмножество
+        задаёт provider конкретной модели. Сетевые и файловые операции отсутствуют.
+        """
+        route = arguments.strip().casefold()
+        if route not in {"", "chat", "task"}:
+            return "Формат: /efforts [chat|task]."
+        return "\n".join((
+            "Уровни размышлений, которые принимает команда:",
+            "• none — без дополнительного reasoning, если модель поддерживает этот режим.",
+            "• minimal — минимальный бюджет размышлений, меньше low.",
+            "• low — небольшой бюджет для простых запросов.",
+            "• medium — средний бюджет размышлений.",
+            "• high — повышенный бюджет для сложных запросов.",
+            "• xhigh — дополнительный бюджет сверх high, если модель его поддерживает.",
+            "• max — расширенный бюджет; конкретные ограничения задаёт провайдер.",
+            "• ultra — дополнительный режим большого бюджета; поведение задаёт провайдер.",
+            "",
+            "Набор доступных уровней и их смысл зависят от модели и провайдера. Больший бюджет может увеличить время ответа и стоимость.",
+            "Уровни из каталога конкретной модели: /models" + (" " + route if route else "") + ". Если каталог их не перечисляет, поддержка выясняется при запуске.",
+            "Изменить только уровень: /effort [chat|task] уровень. Настройка действует для следующих запросов треда.",
+        ))
+
     def _model_settings_text(self, thread: int) -> str:
         """Показать worker metadata с учётом явных настроек текущего треда.
 
@@ -292,6 +373,8 @@ class ChatCommandMixin:
             "/help — команды и текущие настройки моделей.",
             "/model [chat|task] MODEL [EFFORT] — модель следующих запросов треда; /model default — сброс.",
             "/models [chat|task] — каталоги моделей для обычных ответов и задач.",
+            "/effort [chat|task] УРОВЕНЬ — размышления следующих запросов с сохранением модели; без аргументов — текущие настройки.",
+            "/efforts [chat|task] — уровни размышлений и их назначение.",
             "/plan <запрос> — составить план без изменения файлов.",
             "/review <запрос> — проверить код или материалы без исправлений.",
             "",
@@ -401,6 +484,10 @@ class ChatCommandMixin:
                 result = self._model_command(thread, parse_chat_command(message.get("text") or "")[1])
             elif command == "models":
                 result = self._models_text(thread, parse_chat_command(message.get("text") or "")[1])
+            elif command == "effort":
+                result = self._effort_command(thread, parse_chat_command(message.get("text") or "")[1])
+            elif command == "efforts":
+                result = self._efforts_text(parse_chat_command(message.get("text") or "")[1])
             elif command in {"plan", "review"}:
                 result = f"Формат: /{command} <запрос>. Режим работает без изменения файлов."
             else:

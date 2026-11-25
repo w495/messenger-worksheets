@@ -856,7 +856,7 @@ class Bridge:
                         role = "assistant"
                     else:
                         role = "user"
-                        if chat_command(text) in {"stop", "status", "reset", "help", "model", "models"}:
+                        if chat_command(text) in {"stop", "status", "reset", "help", "model", "models", "effort", "efforts"}:
                             continue
                     store.remember(thread, previous_stamp, role, text)
             if initialized:

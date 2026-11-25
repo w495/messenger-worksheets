@@ -76,6 +76,8 @@ class ThreadContextIntegrationTest(unittest.TestCase):
             (120, {"text": "<html>/* сохранить код */</html>", "author_guid": "service"}),
             (130, {"text": "/status", "author_guid": "human"}),
             (135, {"text": "**/model** example-model high", "author_guid": "human"}),
+            (136, {"text": "/effort high", "author_guid": "human"}),
+            (137, {"text": "**/efforts**", "author_guid": "human"}),
             (140, {"text": "# Только для людей", "author_guid": "human"}),
         ]
         prepared = self.bridge._prepare_thread_context(100, 200, {"text": "Уточнение"})
