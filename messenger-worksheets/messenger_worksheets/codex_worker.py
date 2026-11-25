@@ -36,7 +36,7 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_RESULT_BYTES = 50 * 1024 * 1024
 IMAGE_TYPES = {"jpeg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp"}
 MODEL_KEY = "WORKSHEET_CODEX_API_KEY"
-REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 LOCAL_USER_DISABLED_FEATURES = ("apps", "browser_use", "computer_use", "remote_plugin")
 DIRECT_HISTORY_ITEMS = 20
 DIRECT_HISTORY_BYTES = 64 * 1024
@@ -438,7 +438,7 @@ def execute_direct_response(request: Request, state_dir: Path, job_id: str | Non
     model, effort = settings["model"], settings["reasoning_effort"]
     if effort not in REASONING_EFFORTS:
         raise ValueError("unsupported direct reasoning effort")
-    body = json.dumps({
+    payload = {
         "model": model,
         "instructions": INSTRUCTIONS + f" Текущая модель: {model}. На прямой вопрос назови эту модель." + option_instructions(request.options),
         "input": [{"role": "user", "content": content}],
@@ -446,8 +446,11 @@ def execute_direct_response(request: Request, state_dir: Path, job_id: str | Non
         "tools": [],
         "tool_choice": "none",
         "max_output_tokens": 4096,
-        "reasoning": {"effort": effort},
-    }, ensure_ascii=False).encode()
+    }
+    non_reasoning_model = model.startswith(("gpt-4", "gpt-3.5", "chatgpt-4o"))
+    if effort != "none" or not non_reasoning_model:
+        payload["reasoning"] = {"effort": effort}
+    body = json.dumps(payload, ensure_ascii=False).encode()
     http_request = HTTPRequest(
         "https://api.openai.com/v1/responses",
         data=body,

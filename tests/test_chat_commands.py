@@ -42,6 +42,12 @@ class ChatCommandsTest(unittest.TestCase):
         self.bridge._worker_capabilities = Mock(return_value={
             "model": "configured-model", "reasoning_effort": "high", "mode": "local_user",
         })
+        self.bridge._worker_models = Mock(return_value={
+            "available": True, "provider": "sandbox_admin", "source": "codex_active_catalog",
+            "scope": "catalogue", "fetched_at": 123, "truncated": False, "error": None,
+            "models": [{"id": "listed-model", "is_default": True,
+                        "reasoning_efforts": ["low", "high"], "default_reasoning_effort": "low"}],
+        })
         self.bridge._command_schema()
 
     def command(self, text, *, parent=100, stamp=200, session="old"):
@@ -55,6 +61,7 @@ class ChatCommandsTest(unittest.TestCase):
             ("# people\n/help", "help"), ("/* ignored */ /status", "status"),
             ("/model gpt-6.2-sol high", "model"), ("**/plan** explain", "plan"),
             ("`/review inspect files`", "review"),
+            ("/models", "models"), ("**/models** task", "models"),
         ):
             with self.subTest(text=text):
                 self.assertEqual(chat_command(text), name)
@@ -70,6 +77,55 @@ class ChatCommandsTest(unittest.TestCase):
         self.bridge._task.assert_not_called()
         self.assertEqual(self.bridge.messenger.send.call_count, 1)
         self.assertIn("нет запущенной", self.bridge.messenger.send.call_args.args[1])
+
+    def test_models_show_both_routes_and_reasoning_without_model_call(self):
+        """Каталоги берутся у двух worker, команда не попадает в модель и не повторяет fetch при replay."""
+        self.command("/models")
+        text = self.bridge.messenger.send.call_args.args[1]
+        self.assertIn("Обычные ответы", text)
+        self.assertIn("/task, /plan, /review", text)
+        self.assertIn("`listed-model` — выбрана", text)
+        self.assertIn("low, high", text)
+        self.assertIn("из каталога", text)
+        self.command("/models")
+        self.assertEqual(self.bridge._worker_models.call_count, 2)
+        self.assertEqual(self.bridge.messenger.send.call_count, 1)
+        self.bridge._draft.assert_not_called()
+        self.bridge._task.assert_not_called()
+
+    def test_model_catalog_failures_are_independent_and_route_argument_is_validated(self):
+        """Сбой каталога первого маршрута не скрывает второй, неверный аргумент не вызывает HTTP."""
+        valid = self.bridge._worker_models.return_value
+        self.bridge._worker_models.side_effect = [RuntimeError("private diagnostic"), valid]
+        self.command("/models")
+        text = self.bridge.messenger.send.call_args.args[1]
+        self.assertIn("Не удалось", text)
+        self.assertIn("listed-model", text)
+        self.assertNotIn("private diagnostic", text)
+        self.bridge._worker_models.reset_mock(side_effect=True)
+        self.command("/models task", stamp=201)
+        self.assertEqual(self.bridge._worker_models.call_count, 1)
+        self.command("/models unknown", stamp=202)
+        self.assertEqual(self.bridge._worker_models.call_count, 1)
+        self.assertIn("Формат", self.bridge.messenger.send.call_args.args[1])
+
+    def test_large_catalog_delivers_every_identifier_in_idempotent_chunks(self):
+        """Большой список не обрезается лимитом сообщения и повтор не создаёт дубликатов частей."""
+        models = [{"id": "gpt-" + str(index) + "x" * 80, "is_default": False,
+                   "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+                   "default_reasoning_effort": "low"} for index in range(100)]
+        self.bridge._worker_models.return_value["models"] = models
+        self.command("/models task")
+        count = self.bridge.messenger.send.call_count
+        self.assertGreater(count, 1)
+        parts = [call.args[1] for call in self.bridge.messenger.send.call_args_list]
+        self.assertTrue(all(len(part) <= 5000 for part in parts))
+        joined = "".join(parts)
+        for item in models:
+            self.assertIn(item["id"], joined)
+        self.command("/models task")
+        self.assertEqual(self.bridge.messenger.send.call_count, count)
+        self.bridge._worker_models.assert_called_once()
 
     def test_reset_clears_only_requested_thread_and_native_session(self):
         """Сброс передаёт точный тред/cutoff и возвращает None для native session."""

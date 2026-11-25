@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 
-REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 MODES = frozenset({"normal", "plan", "review"})
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z", flags=re.ASCII)
 READONLY_DISABLED_FEATURES = (

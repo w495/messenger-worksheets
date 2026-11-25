@@ -10,8 +10,8 @@ import time
 from messenger_codex.bridge import strip_prompt_comments
 
 
-COMMANDS = frozenset({"stop", "status", "reset", "help", "model", "plan", "review"})
-EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
+COMMANDS = frozenset({"stop", "status", "reset", "help", "model", "models", "plan", "review"})
+EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 ACTIVE_STATES = frozenset({"running", "cancelling", "unknown"})
 TERMINAL_STATES = frozenset({"cancelled", "completed", "failed"})
 COMMAND_POLL_SECONDS = 1.0
@@ -30,11 +30,11 @@ def parse_chat_command(text: str) -> tuple[str, str] | None:
         if cleaned.startswith(wrapper) and cleaned.endswith(wrapper):
             cleaned = cleaned[len(wrapper):-len(wrapper)].strip()
             break
-        prefix = re.match(re.escape(wrapper) + r"(/(?:model|plan|review))" + re.escape(wrapper), cleaned, re.IGNORECASE)
+        prefix = re.match(re.escape(wrapper) + r"(/(?:model|models|plan|review))" + re.escape(wrapper), cleaned, re.IGNORECASE)
         if prefix:
             cleaned = prefix[1] + cleaned[prefix.end():]
             break
-    match = re.fullmatch(r"/(stop|status|reset|help|model|plan|review)(?:\s+([\s\S]*))?", cleaned, re.IGNORECASE)
+    match = re.fullmatch(r"/(stop|status|reset|help|models|model|plan|review)(?:\s+([\s\S]*))?", cleaned, re.IGNORECASE)
     if match is None:
         return None
     name, arguments = match[1].lower(), (match[2] or "").strip()
@@ -161,7 +161,7 @@ class ChatCommandMixin:
         if not 1 <= len(parts) <= 2 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", parts[0]) or (
             len(parts) == 2 and parts[1] not in EFFORTS
         ):
-            return "Формат: /model [chat|task] MODEL [low|medium|high|xhigh|max|ultra] либо /model default."
+            return "Формат: /model [chat|task] MODEL [none|minimal|low|medium|high|xhigh|max|ultra] либо /model default."
         with self.db:
             if route == -1:
                 self.db.execute("DELETE FROM chat_models WHERE thread=?", (thread,))
@@ -291,12 +291,87 @@ class ChatCommandMixin:
             "/reset — очистить контекст треда; выполняющуюся задачу сначала остановите.",
             "/help — команды и текущие настройки моделей.",
             "/model [chat|task] MODEL [EFFORT] — модель следующих запросов треда; /model default — сброс.",
+            "/models [chat|task] — каталоги моделей для обычных ответов и задач.",
             "/plan <запрос> — составить план без изменения файлов.",
             "/review <запрос> — проверить код или материалы без исправлений.",
             "",
         ]
         lines.append(self._model_settings_text(thread))
         return "\n".join(lines)
+
+    def _models_text(self, thread: int, arguments: str) -> str:
+        """Показать каталоги обоих маршрутов, reasoning и выбранную модель треда.
+
+        Необязательный аргумент chat/task выбирает один маршрут; другие значения
+        возвращают usage без сети. Сбой одного worker не скрывает второй список.
+        Имена и уровни предварительно проверены RPC schema. Каталог не является
+        проверкой доступа к каждой модели и так обозначается участникам.
+        """
+        selected = arguments.strip().casefold()
+        if selected not in {"", "chat", "task"}:
+            return "Формат: /models [chat|task]."
+        lines = []
+        for task, label in ((False, "Обычные ответы"), (True, "/task, /plan, /review")):
+            if selected and selected != ("task" if task else "chat"):
+                continue
+            if lines:
+                lines.append("")
+            lines.append(label + ":")
+            try:
+                route = self._job_route(task)
+                catalog = self._worker_models(route.pop("endpoint"), **route)
+                if not catalog["available"]:
+                    lines.append("Каталог сейчас недоступен. Повторите /models позже.")
+                    continue
+                source = "OpenAI Models API" if catalog["source"] == "openai_models_api" else "Codex CLI"
+                lines.append("Источник: " + source + ".")
+                options = self._model_options(thread, task)
+                current = options.get("model")
+                for item in catalog["models"]:
+                    chosen = item["id"] == current if current else item["is_default"]
+                    line = "• `" + item["id"] + "`" + (" — выбрана" if chosen else "")
+                    if item["reasoning_efforts"]:
+                        line += "; размышления: " + ", ".join(item["reasoning_efforts"])
+                    lines.append(line)
+                if not catalog["models"]:
+                    lines.append("Провайдер не вернул текстовых моделей.")
+                if current and not any(item["id"] == current for item in catalog["models"]):
+                    lines.append("Выбрана `" + current + "`; в этом каталоге её нет.")
+                if catalog["truncated"]:
+                    lines.append("Каталог превышает лимит 256 моделей; показана его часть.")
+                if catalog["source"] == "openai_models_api":
+                    lines.append("Models API не перечисляет допустимые уровни размышлений.")
+            except Exception:
+                lines.append("Не удалось получить каталог worker. Повторите /models позже.")
+        lines.append("\nСписок получен из каталога. Доступ к конкретной модели проверяется при запуске.")
+        lines.append("Выбор: /model [chat|task] имя [уровень].")
+        return "\n".join(lines)
+
+    def _send_command_result(self, parent: int, stamp: int, text: str) -> None:
+        """Доставить полный ответ команды безопасными идемпотентными частями.
+
+        Короткий ответ сохраняет прежний stage command. Длинный каталог делится
+        по строкам на сообщения до 5000 символов; stage каждой части стабилен.
+        Повтор после сбоя отправляет только недоставленные части и не вызывает
+        модель. Ошибки доставки передаются, сохраняя receipt команды в SQLite.
+        """
+        destination = self._delivery_parent(parent, stamp)
+        if len(text) <= 6000:
+            self.status(parent, stamp, "command", text, delivery_parent=destination)
+            return
+        chunks, current = [], ""
+        for line in text.splitlines(keepends=True):
+            if len(current) + len(line) > 5000 and current:
+                chunks.append(current)
+                current = ""
+            while len(line) > 5000:
+                chunks.append(line[:5000])
+                line = line[5000:]
+            current += line
+        if current:
+            chunks.append(current)
+        for index, chunk in enumerate(chunks):
+            self.status(parent, stamp, f"command-{index}", chunk, delivery_parent=destination)
 
     def _handle_command(self, parent: int, stamp: int, message: dict, command: str) -> None:
         """Идемпотентно выполнить одну команду и отправить служебный ответ в тред.
@@ -324,6 +399,8 @@ class ChatCommandMixin:
                 result = self._help_text(thread)
             elif command == "model":
                 result = self._model_command(thread, parse_chat_command(message.get("text") or "")[1])
+            elif command == "models":
+                result = self._models_text(thread, parse_chat_command(message.get("text") or "")[1])
             elif command in {"plan", "review"}:
                 result = f"Формат: /{command} <запрос>. Режим работает без изменения файлов."
             else:
@@ -365,7 +442,7 @@ class ChatCommandMixin:
                     "WHERE parent=? AND incoming=?",
                     (result, pending, stop_job_id, stop_task, parent, stamp),
                 )
-        self.status(parent, stamp, "command", result, delivery_parent=self._delivery_parent(parent, stamp))
+        self._send_command_result(parent, stamp, result)
         if pending:
             self._recover_pending_stops(thread)
 

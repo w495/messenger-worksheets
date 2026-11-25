@@ -48,6 +48,16 @@ class CloudBridge(ChatCommandMixin, Bridge):
         """
         return codex_rpc.worker_capabilities(*args, **kwargs)
 
+    @staticmethod
+    def _worker_models(*args, **kwargs) -> dict:
+        """Запросить очищенный каталог моделей с аутентификацией выбранного worker.
+
+        Аргументы формируются gateway из фиксированного маршрута, не из чата.
+        Полную проверку JSON и ограничения ответа выполняет RPC-helper;
+        credentials, сырые инструкции и provider URLs не возвращаются участнику.
+        """
+        return codex_rpc.worker_models(*args, **kwargs)
+
     def _job_identifier(self, parent: int, stamp: int) -> str:
         """Построить стабильный UUID из настроенного чата и точного сообщения.
 

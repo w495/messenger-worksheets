@@ -97,3 +97,18 @@ class WorkerThreadContextTest(unittest.TestCase):
         self.assertIn('read-only', argv)
         self.assertNotIn('danger-full-access', argv)
         self.assertFalse(any('/tmp/untrusted-tools' in item or 'do-not-inherit' in item for item in argv))
+
+    def test_none_reasoning_omits_unsupported_reasoning_field_in_direct_api(self):
+        """None не передаёт reasoning старой модели, а reasoning-модели получает явный none вместо default."""
+        bodies = []
+        def transport(http_request, **kwargs):
+            """Перехватить безопасный payload без сети и вернуть обычный текстовый ответ."""
+            bodies.append(json.loads(http_request.data))
+            return json.dumps({'status': 'completed', 'output': [{'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'ok'}]}]}).encode()
+        for model in ('gpt-4.1', 'gpt-6.2'):
+            request = worker.Request.decode(self.payload(options={'model': model, 'reasoning_effort': 'none'}))
+            with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'WORKSHEET_CODEX_PROVIDER': 'responses_direct', 'WORKSHEET_CODEX_MODEL': 'default', 'WORKSHEET_CODEX_API_KEY': 'test-only'}, clear=True), patch.object(worker, 'post_model_response', side_effect=transport):
+                worker.execute(request, Path(directory))
+        self.assertEqual(bodies[0]['model'], 'gpt-4.1')
+        self.assertNotIn('reasoning', bodies[0])
+        self.assertEqual(bodies[1]['reasoning'], {'effort': 'none'})

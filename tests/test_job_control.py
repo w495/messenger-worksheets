@@ -154,6 +154,7 @@ class JobControlTest(unittest.TestCase):
             try:
                 self.assertEqual(request("/" + identifier, auth="wrong")[0], 401)
                 self.assertEqual(request("/capabilities", auth="wrong")[0], 401)
+                self.assertEqual(request("/models", auth="wrong")[0], 401)
                 self.assertEqual(request("/" + identifier + "/cancel", method="POST", auth="wrong")[0], 401)
                 self.assertEqual(request("/" + identifier)[1]["state"], "unknown")
                 self.assertEqual(request("/" + identifier + "/cancel", method="POST")[1]["state"], "cancelled")
@@ -164,6 +165,11 @@ class JobControlTest(unittest.TestCase):
                 }))
                 self.assertEqual(request("/" + identifier + "/cancel")[0], 404)
                 self.assertEqual(request("/capabilities", method="POST")[0], 404)
+                from messenger_worksheets import model_catalog
+                safe_catalog = model_catalog._empty("responses_direct")
+                with patch.object(model_catalog, "effective_models", return_value=safe_catalog) as fetch:
+                    self.assertEqual(request("/models"), (200, safe_catalog))
+                    fetch.assert_called_once()
             finally:
                 server.job_slots.release()
                 server.shutdown()

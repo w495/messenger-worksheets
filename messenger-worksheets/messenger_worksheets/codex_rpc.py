@@ -142,15 +142,19 @@ def submit(
 def control_request(
     endpoint: str, suffix: str, *, method: str,
     transport_token: str | None = None, ca_file: str | None = None,
+    max_bytes: int = 16 * 1024, timeout: int = 10,
 ) -> dict:
     """Выполнить короткий управляющий запрос к тому же проверенному HTTPS worker.
 
     Параметры: endpoint — настроенный JOB_PATH, suffix — внутренний маршрут,
     method — GET/POST; token/CA выбирают тот же профиль, что и submit. Возвращает
-    JSON-объект не более 16 KiB. ValueError, HTTP/TLS/JSON-ошибки передаются
+    JSON-объект не более max_bytes (по умолчанию 16 KiB, максимум 128 KiB).
+    Timeout ограничен 1..30 секундами. ValueError, HTTP/TLS/JSON-ошибки передаются
     вызывающему. Redirect запрещён; credentials не попадают в URL или журнал.
     """
     url = urlsplit(endpoint)
+    if type(max_bytes) is not int or not 1 <= max_bytes <= 128 * 1024 or type(timeout) is not int or not 1 <= timeout <= 30:
+        raise ValueError("invalid control limits")
     if (url.scheme != "https" or not url.hostname or url.username is not None
             or url.password is not None or url.query or url.fragment or url.path != JOB_PATH):
         raise ValueError("invalid worksheet worker address")
@@ -160,11 +164,29 @@ def control_request(
                           data=b"" if method == "POST" else None, headers={
         "Authorization": "Bearer " + (transport_token or os.environ[TRANSPORT_KEY]),
     })
-    with opener.open(request, timeout=10) as response:
-        result = json.loads(check_size(response.read(16 * 1024 + 1), 16 * 1024))
+    with opener.open(request, timeout=timeout) as response:
+        result = json.loads(check_size(response.read(max_bytes + 1), max_bytes))
     if not isinstance(result, dict):
         raise ValueError("invalid worker control result")
     return result
+
+
+def worker_models(
+    endpoint: str, *, transport_token: str | None = None, ca_file: str | None = None,
+) -> dict:
+    """Получить очищенный каталог моделей конкретного worker по его TLS-профилю.
+
+    Параметры соответствуют submit; произвольный provider URL из чата не
+    принимается. Возвращает каталог после строгой проверки безопасной schema.
+    Ответ ограничен 128 KiB и 25 секундами; ошибки сети и schema передаются,
+    а недоступный каталог не подменяется встроенным списком моделей.
+    """
+    from .model_catalog import validate_catalog
+
+    result = control_request(endpoint, "/models", method="GET",
+                             transport_token=transport_token, ca_file=ca_file,
+                             max_bytes=128 * 1024, timeout=25)
+    return validate_catalog(result)
 
 
 def job_control(
@@ -236,7 +258,7 @@ def effective_capabilities() -> dict:
     )
     if model is not None and (len(model) > 100 or any(not (c.isascii() and (c.isalnum() or c in "_.-")) for c in model)):
         raise ValueError("invalid effective model")
-    if effort is not None and effort not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+    if effort is not None and effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
         raise ValueError("invalid effective effort")
     return {"model": model, "reasoning_effort": effort, "mode": mode,
             "task_supported": mode != "responses_direct"}
@@ -494,6 +516,11 @@ class JobHandler(BaseHTTPRequestHandler):
                 raise ValueError("unexpected control body")
             if not cancel and self.path == JOB_PATH + "/capabilities":
                 self.send_json(200, effective_capabilities())
+                return
+            if not cancel and self.path == JOB_PATH + "/models":
+                from .model_catalog import effective_models
+
+                self.send_json(200, effective_models())
                 return
             prefix = JOB_PATH + "/"
             suffix = "/cancel" if cancel else ""
