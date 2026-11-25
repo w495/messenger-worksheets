@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import re
+import secrets
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlsplit, urlunsplit
@@ -15,6 +16,34 @@ import uuid
 
 from smoke_test_worker import load_rpc_environment
 from messenger_worksheets.codex_rpc import job_control, submit, worker_capabilities, worker_models
+
+
+def readonly_smoke_job(mode: str) -> tuple[dict, str]:
+    """Создать проверку чтения по имени функции, которое отсутствует в самом запросе.
+
+    Принимает plan/review и возвращает RPC job с синтетическим Python-файлом
+    и ожидаемое полное имя функции. Имя составлено из обычных слов и относится
+    непосредственно к дефекту, который модель должна разобрать. Оно находится
+    только в файле; из текста запроса или metadata узнать его нельзя. Никаких
+    служебных токенов, credentials, сетевых или файловых операций здесь нет.
+    """
+    if mode not in {"plan", "review"}:
+        raise ValueError("invalid readonly smoke mode")
+    words = ("amber", "birch", "cedar", "coral", "delta", "elm", "fern", "iris",
+             "maple", "moss", "oak", "olive", "opal", "pine", "reed", "willow")
+    symbol = "divide_" + "_".join(secrets.choice(words) for _ in range(4))
+    source = f"def {symbol}(x):\n    return x / 0\n".encode()
+    text = (
+        "Составь план исправления дефекта в input/history/check.py. Сначала прочитай файл инструментом команд. "
+        "В заголовке плана укажи полное имя функции из объявления def. Файл не меняй."
+        if mode == "plan" else
+        "Проверь input/history/check.py инструментом команд. Укажи полное имя функции из объявления def "
+        "и конкретный подтверждённый дефект. Ничего не исправляй."
+    )
+    return {"text": text, "task": True, "session": None, "images": [], "context": [],
+            "history_files": [{"name": "check.py", "original_name": "check.py",
+                               "data": base64.b64encode(source).decode("ascii")}],
+            "options": {"mode": mode}}, symbol
 
 
 def readonly_failure_category(text: str) -> str:
@@ -89,8 +118,8 @@ def main() -> None:
     """Выполнить фиксированный live smoke sandbox-route без отправки в Messenger.
 
     Читает только RPC-профиль sandbox gateway, не выводя токен и адрес.
-    Plan/review должны инструментами прочитать случайный маркер из history-файла;
-    маркер не передаётся в тексте запроса. Затем отдельный job отменяется по UUID
+    Plan/review должны инструментами прочитать имя функции из history-файла;
+    имя не передаётся в тексте запроса. Затем отдельный job отменяется по UUID
     с проверкой terminal cancelled и HTTP409. Соседние задания не затрагиваются.
     Любое несоответствие вызывает RuntimeError; stdout содержит только итоги.
     """
@@ -109,21 +138,7 @@ def main() -> None:
         raise RuntimeError("control smoke requires a task worker")
     print("worker_capabilities_smoke_ok", flush=True)
     for mode in ("plan", "review"):
-        marker = "READONLY_OK_" + uuid.uuid4().hex
-        source = f"# {marker}\ndef ratio(x):\n    return x / 0\n".encode()
-        job = {
-            "text": (
-                "Сначала инструментом команд прочитай файл input/history/check.py. "
-                "Включи в ответ точное слово READONLY_OK с его полным суффиксом из первой строки файла. "
-                "Затем составь план исправления дефекта." if mode == "plan" else
-                "Инструментом команд прочитай input/history/check.py. Укажи дефект и точное слово "
-                "READONLY_OK с его полным суффиксом из первой строки файла. Ничего не исправляй."
-            ),
-            "task": True, "session": None, "images": [], "context": [],
-            "history_files": [{"name": "check.py", "original_name": "check.py",
-                               "data": base64.b64encode(source).decode("ascii")}],
-            "options": {"mode": mode},
-        }
+        job, marker = readonly_smoke_job(mode)
         try:
             result = submit(endpoint, str(uuid.uuid4()), job)
             valid = marker in result["text"] and not result["files"] and result["session"] is None

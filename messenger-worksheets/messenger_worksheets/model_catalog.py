@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
@@ -13,10 +14,12 @@ import signal
 import subprocess
 import threading
 import time
+import unicodedata
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request
 
-from .model_http import check_cancellation, post_model_response
+from .model_http import JobCancelled, check_cancellation, post_model_response
 
 
 CACHE_TTL = 60.0
@@ -25,6 +28,12 @@ MAX_NATIVE_BYTES = 16 * 1024 * 1024
 MAX_API_BYTES = 1024 * 1024
 MAX_MODELS = 256
 MAX_PUBLIC_BYTES = 60 * 1024
+MAX_CONTEXT_WINDOW = 100_000_000
+DETAIL_SOURCES = frozenset({"codex_catalog", "openai_docs", "api_metadata", "unavailable"})
+MODALITIES = ("text", "image", "audio", "video")
+OFFICIAL_HOSTS = frozenset({"openai.com", "www.openai.com", "platform.openai.com", "developers.openai.com"})
+BASE_MODEL_FIELDS = frozenset({"id", "is_default", "reasoning_efforts", "default_reasoning_effort"})
+DETAIL_MODEL_FIELDS = frozenset({"description", "context_window", "max_context_window", "input_modalities", "details_source", "details_url", "reasoning_source", "reasoning_descriptions"})
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z", re.ASCII)
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 PROVIDERS = frozenset({"responses_direct", "local_user", "sandbox_admin", "endpoint", "openai", "direct_openai"})
@@ -43,7 +52,11 @@ def validate_catalog(value: object) -> dict:
     времени и списка моделей. Допускает до 256 уникальных безопасных ID,
     булевы признаки и только известные уровни reasoning. Возвращает независимую
     копию; неизвестные поля, роли источника, типы и лимиты вызывают ValueError.
-    Сеть и ФС не используются; инструкции, адреса и credentials не пропускаются.
+    Старые записи из четырёх полей дополняются неизвестными metadata, полная
+    запись содержит двенадцать полей; предыдущая версия из одиннадцати полей
+    принимается с пустыми reasoning descriptions. Описания — plain text, context bounded,
+    ссылки только официальные HTTPS. После нормализации применяется общий лимит.
+    Сеть и ФС не используются; инструкции и credentials не пропускаются.
     """
     fields = {"available", "provider", "source", "scope", "fetched_at", "models", "truncated", "error"}
     errors = {None, "configuration", "invalid_response", "timeout", "response_too_large", "execution_failed",
@@ -60,9 +73,13 @@ def validate_catalog(value: object) -> dict:
         raise ValueError("inconsistent model catalog")
     if value["available"] and value["error"] is not None:
         raise ValueError("successful model catalog contains an error")
+    if len(json.dumps(value, ensure_ascii=False).encode()) > 64 * 1024:
+        raise ValueError("model catalog exceeds limit")
+    checked = deepcopy(value)
     identifiers = set()
-    for item in value["models"]:
-        if (not isinstance(item, dict) or item.keys() != {"id", "is_default", "reasoning_efforts", "default_reasoning_effort"}
+    normalized = []
+    for item in checked["models"]:
+        if (not isinstance(item, dict) or item.keys() not in (BASE_MODEL_FIELDS, BASE_MODEL_FIELDS | (DETAIL_MODEL_FIELDS - {"reasoning_descriptions"}), BASE_MODEL_FIELDS | DETAIL_MODEL_FIELDS)
                 or not isinstance(item["id"], str) or MODEL_ID.fullmatch(item["id"]) is None or item["id"] in identifiers
                 or type(item["is_default"]) is not bool or not isinstance(item["reasoning_efforts"], list)
                 or len(item["reasoning_efforts"]) > len(EFFORTS)
@@ -70,10 +87,150 @@ def validate_catalog(value: object) -> dict:
                 or len(set(item["reasoning_efforts"])) != len(item["reasoning_efforts"])
                 or (item["default_reasoning_effort"] is not None and _safe_effort(item["default_reasoning_effort"]) is None)):
             raise ValueError("invalid catalog model")
+        if item.keys() == BASE_MODEL_FIELDS:
+            item.update(_empty_details())
+            if value["source"] == "codex_active_catalog" and item["reasoning_efforts"]:
+                item["reasoning_source"] = "codex_catalog"
+        item.setdefault("reasoning_descriptions", {})
+        if (not isinstance(item["description"], str) or len(item["description"]) > 600
+                or _plain_description(item["description"]) != item["description"]
+                or any(item[key] is not None and _context_window(item[key]) is None for key in ("context_window", "max_context_window"))
+                or not isinstance(item["input_modalities"], list) or len(item["input_modalities"]) > len(MODALITIES)
+                or any(not isinstance(mode, str) or mode not in MODALITIES for mode in item["input_modalities"])
+                or len(set(item["input_modalities"])) != len(item["input_modalities"])
+                or not isinstance(item["reasoning_descriptions"], dict)
+                or not item["reasoning_descriptions"].keys() <= set(item["reasoning_efforts"])
+                or any(not isinstance(text, str) or len(text) > 300 or _plain_description(text) != text
+                       for text in item["reasoning_descriptions"].values())
+                or not isinstance(item["details_source"], str) or item["details_source"] not in DETAIL_SOURCES
+                or not isinstance(item["reasoning_source"], str) or item["reasoning_source"] not in DETAIL_SOURCES
+                or (item["details_url"] is not None and _official_url(item["details_url"]) is None)):
+            raise ValueError("invalid catalog model details")
         identifiers.add(item["id"])
-    if len(json.dumps(value).encode()) > 64 * 1024:
-        raise ValueError("model catalog exceeds limit")
-    return deepcopy(value)
+        normalized.append(item)
+    checked["models"], extra_truncation = _bounded_models(normalized)
+    checked["truncated"] = checked["truncated"] or extra_truncation
+    return checked
+
+
+def _empty_details() -> dict:
+    """Вернуть независимые пустые поля описания и происхождения модели.
+
+    Параметров нет. None и пустые списки означают отсутствие подтверждённых
+    данных, не отсутствие возможности у модели. Сеть и ФС не используются;
+    новый dict можно безопасно дополнять без изменения соседних записей.
+    """
+    return {"description": "", "context_window": None, "max_context_window": None,
+            "input_modalities": [], "details_source": "unavailable", "details_url": None,
+            "reasoning_source": "unavailable", "reasoning_descriptions": {}}
+
+
+def _plain_description(value: object) -> str:
+    """Свести одно описание каталога к максимум 600 символам обычного текста.
+
+    Нестроковые значения дают пустую строку. В ограниченном префиксе удаляются
+    HTML/Markdown-разметка, управляющие и скрытые Unicode-символы, схлопываются
+    пробелы. Функция не выполняет текст, не следует ссылкам и не читает env/ФС;
+    базовые инструкции и произвольные поля модельной записи сюда не передаются.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = html.unescape(value[:8192])
+    text = re.sub(r"<[^>]*>", " ", text)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = "".join(" " if char.isspace() else char for char in text if char.isspace() or not unicodedata.category(char).startswith("C"))
+    text = re.sub(r"[*_`#<>\[\]\\]", "", text)
+    return " ".join(text.split())[:600].rstrip()
+
+
+def _context_window(value: object) -> int | None:
+    """Проверить необязательное число токенов без преобразования строк или bool.
+
+    Принимает произвольное значение, возвращает только положительный int до
+    MAX_CONTEXT_WINDOW либо None. Граница защищает публичную schema от мусорных
+    метаданных; сетевых обращений и изменений состояния функция не выполняет.
+    """
+    return value if type(value) is int and 0 < value <= MAX_CONTEXT_WINDOW else None
+
+
+def _official_url(value: object) -> str | None:
+    """Пропустить только короткий HTTPS URL официального сайта OpenAI без секретов.
+
+    Принимает произвольное значение. Возвращает исходную строку только для
+    allowlisted host, без userinfo, нестандартного порта, query, fragment и
+    управляющих символов; иначе None. URL служит ссылкой на источник, функция
+    не открывает его и не позволяет задавать сетевой маршрут из чата.
+    """
+    if not isinstance(value, str) or len(value) > 600 or any(char.isspace() or unicodedata.category(char).startswith("C") for char in value):
+        return None
+    try:
+        url = urlsplit(value)
+        if (url.scheme == "https" and url.hostname in OFFICIAL_HOSTS and url.port in (None, 443)
+                and url.username is None and url.password is None and not url.query and not url.fragment
+                and (not url.path or re.fullmatch(r"/[A-Za-z0-9_./%-]*", url.path) is not None)
+                and not any(char in value for char in "<>`\\")):
+            return value
+    except ValueError:
+        pass
+    return None
+
+
+def _bounded_models(models: list[dict]) -> tuple[list[dict], bool]:
+    """Ограничить готовую публичную проекцию числом записей и размером JSON.
+
+    Принимает уже проверенные записи, сохраняет их порядок и возвращает список
+    плюс признак усечения. Учитывает все поля описаний, чтобы расширенная schema
+    и нормализация старых worker оставались в MAX_PUBLIC_BYTES/MAX_MODELS.
+    Ввод-вывод и изменение исходного списка отсутствуют.
+    """
+    result = []
+    for candidate in models:
+        if len(result) >= MAX_MODELS or len(json.dumps([*result, candidate], ensure_ascii=False).encode()) > MAX_PUBLIC_BYTES:
+            return result, True
+        result.append(candidate)
+    return result, False
+
+
+def _model_card(identifier: str) -> dict:
+    """Получить ограниченное обогащение ровно этого API ID из официальных карточек.
+
+    Принимает уже проверенный безопасный ID. Не ищет похожие семейства и не
+    генерирует характеристики; подключённый model_cards выполняет cached lookup
+    с одним ограниченным обновлением индекса. При отсутствии helper возвращает
+    пустой dict. Ошибка справочного источника не скрывает API каталог; отмена
+    job передаётся вызывающему. Проекция повторно очищает все поля и ссылки.
+    """
+    try:
+        from .model_cards import model_card
+    except ImportError:
+        return {}
+    try:
+        return model_card(identifier)
+    except JobCancelled:
+        raise
+    except Exception:
+        check_cancellation()
+        return {}
+
+
+def _details(entry: dict, *, native: bool) -> dict:
+    """Очистить только разрешённые метаданные одной API/native записи каталога.
+
+    Возвращает описание, context windows и известные input modalities с точной
+    меткой происхождения. Неверные/отсутствующие значения становятся неизвестными.
+    Произвольные поля, base instructions и URL из исходного каталога игнорируются;
+    сетевых обращений, env-чтения и изменения записи функция не выполняет.
+    """
+    details = _empty_details()
+    details["description"] = _plain_description(entry.get("description"))
+    for key in ("context_window", "max_context_window"):
+        details[key] = _context_window(entry.get(key))
+    modes = entry.get("input_modalities")
+    if isinstance(modes, list):
+        details["input_modalities"] = [mode for mode in MODALITIES if mode in modes]
+    if any(details[key] for key in ("description", "context_window", "max_context_window", "input_modalities")):
+        details["details_source"] = "codex_catalog" if native else "api_metadata"
+    return details
 
 
 def _empty(provider: str) -> dict:
@@ -105,8 +262,10 @@ def _project(entries: object, *, native: bool, configured: str | None) -> tuple[
     configured — настроенный ID для отметки default. Возвращает пару списка
     моделей и признака усечения. Пропускает скрытые native-записи, нетекстовые
     API-модели, неизвестные поля и небезопасные ID; reasoning проверяет по
-    allowlist. CatalogFailure означает неверный корневой тип. Сети и ФС нет;
-    число и размер результата ограничены MAX_MODELS и MAX_PUBLIC_BYTES.
+    allowlist. API metadata могут дополняться точной официальной карточкой через
+    cached helper с ограниченным обновлением индекса, без запросов к каждой
+    модели. CatalogFailure означает неверный корневой тип. Число и полный размер
+    результата ограничены MAX_MODELS и MAX_PUBLIC_BYTES; raw инструкции исключены.
     """
     if not isinstance(entries, list):
         raise CatalogFailure("invalid_response")
@@ -121,21 +280,44 @@ def _project(entries: object, *, native: bool, configured: str | None) -> tuple[
         if not native and (not re.match(r"(?:gpt-|o[1-9](?:[.-]|$))", identifier)
                            or any(word in identifier.casefold() for word in excluded)):
             continue
-        levels = entry.get("supported_reasoning_levels", []) if native else []
+        details = _details(entry, native=native)
+        levels = entry.get("supported_reasoning_levels", [])
         efforts = {effort for item in levels if isinstance(item, dict)
                    and (effort := _safe_effort(item.get("effort"))) is not None} if isinstance(levels, list) else set()
+        if not native and isinstance(entry.get("reasoning_efforts"), list):
+            efforts.update(effort for item in entry["reasoning_efforts"] if (effort := _safe_effort(item)) is not None)
+        default = _safe_effort(entry.get("default_reasoning_level" if native else "default_reasoning_effort"))
+        descriptions = {item["effort"]: _plain_description(item.get("description"))[:300].rstrip()
+                        for item in levels if isinstance(item, dict) and _safe_effort(item.get("effort")) is not None
+                        and _plain_description(item.get("description"))} if isinstance(levels, list) else {}
+        if not native and isinstance(entry.get("reasoning_descriptions"), dict):
+            descriptions.update({level: _plain_description(text)[:300].rstrip() for level, text in entry["reasoning_descriptions"].items()
+                                 if _safe_effort(level) is not None and _plain_description(text)})
+        if efforts or default is not None:
+            details["reasoning_source"] = "codex_catalog" if native else "api_metadata"
+        if not native:
+            card = _model_card(identifier)
+            if isinstance(card, dict) and card.get("details_source") == "openai_docs" and _official_url(card.get("details_url")):
+                card_details = _details(card, native=False)
+                for key in ("description", "context_window", "max_context_window", "input_modalities"):
+                    if card_details[key]:
+                        details[key] = card_details[key]
+                details.update(details_source="openai_docs", details_url=_official_url(card["details_url"]))
+                card_efforts = card.get("reasoning_efforts")
+                if isinstance(card_efforts, list):
+                    documented = {effort for item in card_efforts if (effort := _safe_effort(item)) is not None}
+                    if documented:
+                        efforts = documented
+                        default = _safe_effort(card.get("default_reasoning_effort"))
+                        details["reasoning_source"] = "openai_docs"
+                        raw_descriptions = card.get("reasoning_descriptions", {})
+                        descriptions = {level: _plain_description(text)[:300].rstrip() for level, text in raw_descriptions.items()
+                                        if _safe_effort(level) is not None and _plain_description(text)} if isinstance(raw_descriptions, dict) else {}
+        details["reasoning_descriptions"] = {level: text for level, text in descriptions.items() if level in efforts}
         models[identifier] = {"id": identifier, "is_default": identifier == configured,
                               "reasoning_efforts": [item for item in EFFORTS if item in efforts],
-                              "default_reasoning_effort": _safe_effort(entry.get("default_reasoning_level")) if native else None}
-    result = []
-    truncated = False
-    for identifier in sorted(models):
-        candidate = models[identifier]
-        if len(result) >= MAX_MODELS or len(json.dumps([*result, candidate]).encode()) > MAX_PUBLIC_BYTES:
-            truncated = True
-            break
-        result.append(candidate)
-    return result, truncated
+                              "default_reasoning_effort": default, **details}
+    return _bounded_models([models[identifier] for identifier in sorted(models)])
 
 
 def _native_output(binary: str) -> bytes:

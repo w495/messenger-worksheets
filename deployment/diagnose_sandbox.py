@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 from pathlib import Path
@@ -401,11 +400,12 @@ def inner_native() -> None:
     ограниченную validate_trace проекцию; model/runtime ошибки скрыты категорией.
     """
     from messenger_worksheets import codex_worker as worker
+    from smoke_test_commands import readonly_smoke_job
 
     os.umask(0o077)
     os.environ["WORKSHEET_CODEX_PROVIDER"] = "sandbox_admin"
     os.environ["WORKSHEET_CODEX_TASK_TIMEOUT"] = "120"
-    marker = "READONLY_OK_" + uuid.uuid4().hex
+    job, marker = readonly_smoke_job("review")
     trace = {"marker_found": False, "commands": [], "final_reply": "", "error": None}
     original = worker.run_codex_process
     def capture(*args, **kwargs):
@@ -422,6 +422,8 @@ def inner_native() -> None:
                     continue
                 output = item.get("aggregated_output", "")
                 code = item.get("exit_code")
+                if code == 0 and isinstance(output, str) and marker in output:
+                    trace["marker_found"] = True
                 trace["commands"].append({"exit_code": code if type(code) is int else None,
                                           "diagnostic": safe_diagnostic(output.encode()) if isinstance(output, str) else ""})
             except (ValueError, TypeError, AttributeError, RecursionError):
@@ -429,15 +431,10 @@ def inner_native() -> None:
         return result
     worker.run_codex_process = capture
     try:
-        source = ("# " + marker + "\ndef ratio(x):\n    return x / 0\n").encode()
-        request = worker.Request.decode({
-            "text": "Инструментом команд прочитай input/history/check.py. Укажи дефект и точное слово READONLY_OK с полным суффиксом первой строки. Ничего не исправляй.",
-            "task": True, "session": None, "images": [], "context": [], "options": {"mode": "review"},
-            "history_files": [{"name": "check.py", "original_name": "check.py", "data": base64.b64encode(source).decode("ascii")}],
-        })
+        request = worker.Request.decode(job)
         with TemporaryDirectory(prefix="sandbox-diag-", dir=STATE) as directory:
             result = worker.execute(request, Path(directory))
-        trace["marker_found"] = marker in result["text"]
+        trace["marker_found"] = trace["marker_found"] or marker in result["text"]
         trace["final_reply"] = safe_diagnostic(result["text"].encode())
     except Exception:
         trace["error"] = "execution_failed"

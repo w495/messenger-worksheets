@@ -185,7 +185,7 @@ def worker_models(
 
     result = control_request(endpoint, "/models", method="GET",
                              transport_token=transport_token, ca_file=ca_file,
-                             max_bytes=128 * 1024, timeout=25)
+                             max_bytes=128 * 1024, timeout=30)
     return validate_catalog(result)
 
 

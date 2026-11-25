@@ -21,6 +21,10 @@ class ModelCatalogTest(unittest.TestCase):
         self.environment = patch.dict(os.environ, {}, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        self.original_card_lookup = catalog._model_card
+        self.cards = patch.object(catalog, "_model_card", return_value={})
+        self.card_lookup = self.cards.start()
+        self.addCleanup(self.cards.stop)
 
     def test_direct_api_projects_text_models_without_secret_or_raw_metadata(self):
         """GET использует фиксированный origin и публикует только безопасные текстовые ID."""
@@ -47,14 +51,15 @@ class ModelCatalogTest(unittest.TestCase):
         """Скрытые записи и произвольные поля native catalogue не выходят наружу."""
         os.environ.update(WORKSHEET_CODEX_PROVIDER="sandbox_admin", WORKSHEET_CODEX_BINARY="/synthetic/codex")
         payload = {"models": [{"slug": "gpt-6.2-sol", "visibility": "list",
-                               "supported_reasoning_levels": [{"effort": "high", "description": "secret"}, {"effort": "medium"}, {"effort": "invented"}],
+                               "supported_reasoning_levels": [{"effort": "high", "description": "More deliberate reasoning"}, {"effort": "medium"}, {"effort": "invented"}],
                                "default_reasoning_level": "medium", "instructions": "secret"},
                               {"slug": "gpt-hidden", "visibility": "hide"}, {"slug": "gpt-bad\n", "visibility": "list"}]}
         with patch.object(catalog, "_native_output", return_value=json.dumps(payload).encode()) as native:
             result = catalog.effective_models()
         native.assert_called_once_with("/synthetic/codex")
         self.assertEqual(result["models"], [{"id": "gpt-6.2-sol", "is_default": False,
-                                            "reasoning_efforts": ["medium", "high"], "default_reasoning_effort": "medium"}])
+                                            "reasoning_efforts": ["medium", "high"], "default_reasoning_effort": "medium",
+                                            **{**catalog._empty_details(), "reasoning_source": "codex_catalog", "reasoning_descriptions": {"high": "More deliberate reasoning"}}}])
         self.assertEqual(result["source"], "codex_active_catalog")
         self.assertNotIn("secret", json.dumps(result))
 
@@ -65,11 +70,12 @@ class ModelCatalogTest(unittest.TestCase):
             self.assertEqual(catalog.effective_models()["error"], "response_too_large")
         entries = [{"id": f"gpt-{index:04d}"} for index in range(300)]
         models, truncated = catalog._project(entries, native=False, configured=None)
-        self.assertEqual(len(models), 256)
+        self.assertGreater(len(models), 0)
+        self.assertLessEqual(len(models), 256)
         self.assertTrue(truncated)
         with patch.object(catalog, "MAX_PUBLIC_BYTES", 200):
             models, truncated = catalog._project(entries, native=False, configured=None)
-        self.assertLessEqual(len(json.dumps(models).encode()), 200)
+        self.assertLessEqual(len(json.dumps(models, ensure_ascii=False).encode()), 200)
         self.assertTrue(truncated)
 
     def test_failure_is_safe_and_unsupported_provider_never_queries(self):
@@ -109,6 +115,132 @@ class ModelCatalogTest(unittest.TestCase):
         for bad in bad_values:
             with self.subTest(keys=list(bad)), self.assertRaises(ValueError):
                 catalog.validate_catalog(bad)
+
+    def test_native_capabilities_keep_catalog_values_and_strip_markup_controls(self):
+        """Native context и модальности берутся из CLI, API карточки не подменяют их."""
+        entries = [{"slug": "gpt-6.2-sol", "visibility": "list",
+                    "description": "**Fast** [coding](https://example.test) <b>model</b>\n\u202e!",
+                    "context_window": 500000, "max_context_window": 872000,
+                    "input_modalities": ["text", "image", "text", "unknown"],
+                    "supported_reasoning_levels": [{"effort": "high", "description": "**Increased** reasoning"},
+                                                   {"effort": "ultra", "description": "Maximum reasoning with automatic task delegation"}], "default_reasoning_level": "high",
+                    "base_instructions": "must never appear"}]
+        models, truncated = catalog._project(entries, native=True, configured="gpt-6.2-sol")
+        model = models[0]
+        self.assertFalse(truncated)
+        self.assertEqual(model["description"], "Fast coding model !")
+        self.assertEqual(model["context_window"], 500000)
+        self.assertEqual(model["max_context_window"], 872000)
+        self.assertEqual(model["input_modalities"], ["text", "image"])
+        self.assertEqual(model["details_source"], "codex_catalog")
+        self.assertEqual(model["reasoning_source"], "codex_catalog")
+        self.assertEqual(model["reasoning_descriptions"], {"high": "Increased reasoning", "ultra": "Maximum reasoning with automatic task delegation"})
+        self.assertIsNone(model["details_url"])
+        self.assertNotIn("must never appear", json.dumps(model))
+        self.card_lookup.assert_not_called()
+
+    def test_api_exact_card_enrichment_preserves_unknowns_and_does_not_infer_family(self):
+        """Только точная карточка добавляет свойства и подтверждённые четыре уровня."""
+        known = {"description": "Программирование и работа с кодом.", "context_window": 400000,
+                 "input_modalities": ["text", "image"], "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+                 "details_source": "openai_docs", "details_url": "https://developers.openai.com/api/docs/models/gpt-5.3-codex"}
+        self.card_lookup.side_effect = lambda identifier: known if identifier == "gpt-5.3-codex" else {}
+        models, _ = catalog._project([{"id": "gpt-5.3-codex"}, {"id": "gpt-5.3-codex-unpublished"}], native=False, configured=None)
+        first, unknown = models
+        self.assertEqual(first["description"], known["description"])
+        self.assertEqual(first["reasoning_efforts"], ["low", "medium", "high", "xhigh"])
+        self.assertEqual(first["reasoning_source"], "openai_docs")
+        self.assertEqual(first["context_window"], 400000)
+        self.assertEqual(first["details_source"], "openai_docs")
+        self.assertEqual(unknown["description"], "")
+        self.assertEqual(unknown["reasoning_efforts"], [])
+        self.assertEqual(unknown["reasoning_source"], "unavailable")
+        self.assertIsNone(unknown["context_window"])
+        self.assertEqual([call.args[0] for call in self.card_lookup.call_args_list], ["gpt-5.3-codex", "gpt-5.3-codex-unpublished"])
+
+    def test_api_reported_fields_and_invalid_metadata_are_safely_projected(self):
+        """API capabilities допустимы только в типах/лимитах; bool/float и неизвестные модальности отбрасываются."""
+        models, _ = catalog._project([{"id": "gpt-reported", "description": "Описание" * 200,
+                                       "context_window": True, "max_context_window": 1.5,
+                                       "input_modalities": ["audio", "video", "bogus"],
+                                       "reasoning_efforts": ["none", "high", "unknown"], "default_reasoning_effort": "none"}], native=False, configured=None)
+        model = models[0]
+        self.assertEqual(len(model["description"]), 600)
+        self.assertIsNone(model["context_window"])
+        self.assertIsNone(model["max_context_window"])
+        self.assertEqual(model["input_modalities"], ["audio", "video"])
+        self.assertEqual(model["details_source"], "api_metadata")
+        self.assertEqual(model["reasoning_source"], "api_metadata")
+        self.assertEqual(model["reasoning_efforts"], ["none", "high"])
+
+    def test_rich_schema_and_legacy_normalization_enforce_metadata_boundaries(self):
+        """Старые четыре поля дополняются unknown; новая schema блокирует markup, сторонние URL и raw инструкции."""
+        value = catalog._empty("sandbox_admin")
+        old = {"id": "gpt-test", "is_default": False, "reasoning_efforts": ["high"], "default_reasoning_effort": None}
+        value.update(available=True, source="codex_active_catalog", models=[old])
+        normalized = catalog.validate_catalog(value)
+        model = normalized["models"][0]
+        self.assertEqual(set(model), catalog.BASE_MODEL_FIELDS | catalog.DETAIL_MODEL_FIELDS)
+        self.assertEqual(model["description"], "")
+        self.assertEqual(model["reasoning_source"], "codex_catalog")
+        self.assertEqual(set(old), catalog.BASE_MODEL_FIELDS)
+        valid = {**model, "description": "Русское описание", "context_window": 1050000,
+                 "details_source": "openai_docs", "details_url": "https://developers.openai.com/api/docs/models/gpt-test"}
+        value["models"] = [valid]
+        self.assertEqual(catalog.validate_catalog(value)["models"][0], valid)
+        for update in ({"description": "**markup**"}, {"description": "bad\u202evalue"}, {"description": "x" * 601},
+                       {"context_window": True}, {"context_window": 1.5}, {"context_window": 100000001},
+                       {"input_modalities": ["text", "unknown"]}, {"details_source": "untrusted"},
+                       {"reasoning_source": "invented"}, {"reasoning_descriptions": {"ultra": "not supported"}},
+                       {"reasoning_descriptions": {"high": "**unsafe markup**"}}, {"reasoning_descriptions": {"high": "x" * 301}},
+                       {"base_instructions": "raw private"}):
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                catalog.validate_catalog({**value, "models": [{**valid, **update}]})
+        for url in ("http://developers.openai.com/a", "https://evil.test/a", "https://openai.com.evil.test/a",
+                    "https://user:password@openai.com/a", "https://openai.com/a?token=secret", "https://openai.com/a#secret",
+                    "https://openai.com/a)bad", "https://openai.com:444/a"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                catalog.validate_catalog({**value, "models": [{**valid, "details_url": url}]})
+
+    def test_russian_descriptions_use_utf8_budget_and_full_projection_is_bounded(self):
+        """Лимит соответствует UTF-8 wire JSON, а не шестикратному ASCII escaping русского текста."""
+        self.card_lookup.return_value = {"description": "Описание назначения модели. " * 8,
+                                         "details_source": "openai_docs", "details_url": "https://developers.openai.com/api/docs/models/gpt-test"}
+        models, truncated = catalog._project([{"id": f"gpt-{index}"} for index in range(54)], native=False, configured=None)
+        self.assertEqual(len(models), 54)
+        self.assertFalse(truncated)
+        self.assertLessEqual(len(json.dumps(models, ensure_ascii=False).encode()), catalog.MAX_PUBLIC_BYTES)
+        old = [{"id": "gpt-" + str(index), "is_default": False, "reasoning_efforts": [], "default_reasoning_effort": None} for index in range(256)]
+        value = catalog._empty("responses_direct")
+        value.update(available=True, source="openai_models_api", models=old)
+        normalized = catalog.validate_catalog(value)
+        self.assertLessEqual(len(json.dumps(normalized["models"], ensure_ascii=False).encode()), catalog.MAX_PUBLIC_BYTES)
+        self.assertTrue(normalized["truncated"])
+
+    def test_previous_eleven_fields_default_empty_reasoning_descriptions(self):
+        """Worker прежней версии с 11 полями остаётся совместимым без выдуманных описаний."""
+        models, _ = catalog._project([{"slug": "gpt-legacy", "visibility": "list"}], native=True, configured=None)
+        models[0].pop("reasoning_descriptions")
+        value = catalog._empty("sandbox_admin")
+        value.update(available=True, source="codex_active_catalog", models=models)
+        normalized = catalog.validate_catalog(value)
+        self.assertEqual(normalized["models"][0]["reasoning_descriptions"], {})
+        self.assertNotIn("reasoning_descriptions", value["models"][0])
+
+    def test_real_card_helper_enriches_default_and_failure_keeps_api_model(self):
+        """Интеграция использует точную реальную карточку offline; сбой справки не скрывает ID."""
+        from messenger_worksheets import model_cards
+        with patch.object(catalog, "_model_card", self.original_card_lookup), patch.object(model_cards, "_index_cards", return_value={}):
+            models, _ = catalog._project([{"id": "gpt-5.3-codex"}], native=False, configured=None)
+        self.assertEqual(models[0]["reasoning_efforts"], ["low", "medium", "high", "xhigh"])
+        self.assertEqual(models[0]["context_window"], 400000)
+        self.assertEqual(models[0]["details_source"], "openai_docs")
+        with patch.object(catalog, "_model_card", self.original_card_lookup), patch.object(model_cards, "model_card", side_effect=RuntimeError("private failure")):
+            models, _ = catalog._project([{"id": "gpt-unknown"}], native=False, configured=None)
+        self.assertEqual(models[0]["id"], "gpt-unknown")
+        self.assertEqual(models[0]["description"], "")
+        self.assertEqual(models[0]["reasoning_efforts"], [])
+        self.assertNotIn("private failure", json.dumps(models))
 
     def test_cache_serializes_fetch_and_returns_independent_values(self):
         """Одновременные вызовы делают один fetch, кеш не меняется через ответ клиента."""

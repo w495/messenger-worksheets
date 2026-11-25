@@ -319,24 +319,282 @@ class ChatCommandsTest(unittest.TestCase):
             self.bridge._effort_command(100, "high")
         self.assertEqual(self.bridge.db.execute("SELECT route,model,effort FROM chat_models").fetchall(), [(-1, "selected", "low")])
 
-    def test_efforts_explains_all_levels_without_network_or_mutation_and_replays_once(self):
-        """Справка дешёвая: восемь значений, caveat поддержки и ссылка на каталог нужного route."""
+    def test_efforts_explains_only_selected_models_levels_without_mutation_and_replays_once(self):
+        """Справка адресуется текущей модели одного маршрута и не подставляет универсальные уровни."""
+        self.bridge._worker_models.return_value["models"][0]["id"] = "configured-model"
         self.command("/efforts task")
         text = self.bridge.messenger.send.call_args.args[1]
-        for level in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
-            self.assertIn("• " + level + " —", text)
-        self.assertIn("/models task", text)
-        self.assertIn("зависят от модели", text)
-        self.assertNotIn("автоагент", text)
+        self.assertIn("(task)", text)
+        self.assertIn("`configured-model`", text)
+        self.assertIn("• `low`:", text)
+        self.assertIn("• `high` — выбран:", text)
+        for level in ("none", "minimal", "medium", "xhigh", "max", "ultra"):
+            self.assertNotIn("• `" + level + "`", text)
+        self.assertIn("/effort task уровень", text)
         self.assertEqual(self.bridge.db.execute("SELECT * FROM chat_models").fetchall(), [])
         self.command("/efforts task")
         self.assertEqual(self.bridge.messenger.send.call_count, 1)
         self.command("/efforts unknown", stamp=201)
         self.assertIn("Формат", self.bridge.messenger.send.call_args.args[1])
-        self.bridge._worker_models.assert_not_called()
-        self.bridge._worker_capabilities.assert_not_called()
+        self.bridge._worker_models.assert_called_once()
+        self.bridge._worker_capabilities.assert_called_once()
         self.bridge._draft.assert_not_called()
         self.bridge._task.assert_not_called()
+
+    def test_efforts_current_mode_follows_last_job_and_reset_barrier(self):
+        """Без аргументов выбирается режим последнего запроса; reset возвращает обычный маршрут."""
+        self.bridge._begin_job(100, 150, "job", True)
+        self.bridge._worker_models.return_value["models"][0]["id"] = "configured-model"
+        self.command("/efforts", stamp=200)
+        self.assertIn("(task)", self.bridge.messenger.send.call_args.args[1])
+        self.bridge.db.execute("CREATE TABLE thread_context_resets(thread INTEGER PRIMARY KEY, cutoff INTEGER)")
+        self.bridge.db.execute("INSERT INTO thread_context_resets VALUES(100,250)")
+        self.bridge.db.commit()
+        self.command("/efforts", stamp=300)
+        self.assertIn("(chat)", self.bridge.messenger.send.call_args.args[1])
+
+    def test_efforts_uses_explicit_selected_model_instead_of_catalogue_default(self):
+        """Для выбранной модели берутся её уровни и описания, даже если default worker другой."""
+        self.command("/model task chosen-model medium", stamp=190)
+        self.bridge._worker_models.return_value["models"].append({
+            "id": "chosen-model", "is_default": False, "reasoning_efforts": ["medium", "high"],
+            "default_reasoning_effort": "low", "reasoning_source": "codex_catalog",
+            "reasoning_descriptions": {"medium": "Balances speed and reasoning depth for everyday tasks"},
+        })
+        self.command("/efforts task")
+        text = self.bridge.messenger.send.call_args.args[1]
+        self.assertIn("`chosen-model`", text)
+        self.assertIn("• `medium` — выбран: Баланс скорости", text)
+        self.assertNotIn("• `low`", text)
+        self.assertNotIn("`listed-model`", text)
+
+    def test_efforts_unknown_capabilities_does_not_guess_eight_levels(self):
+        """Отсутствие списка для конкретной модели явно обозначается и не заменяется всеми уровнями."""
+        self.bridge._worker_models.return_value["models"] = []
+        self.command("/efforts chat")
+        text = self.bridge.messenger.send.call_args.args[1]
+        self.assertIn("`configured-model`", text)
+        self.assertIn("не сообщил точный набор", text)
+        self.assertNotIn("• `", text)
+
+    def test_models_show_provider_purpose_and_concrete_capabilities(self):
+        """Назначение, контекст и входы относятся к строке модели; отсутствующие сведения не угадываются."""
+        item = self.bridge._worker_models.return_value["models"][0]
+        item.update(description="Fast, go-to model for coding and everyday work.", context_window=500000,
+                    max_context_window=872000, input_modalities=["text", "image"])
+        self.command("/models task")
+        text = self.bridge.messenger.send.call_args.args[1]
+        self.assertIn("Назначение: Быстрая модель для программирования", text)
+        self.assertIn("500 000 токенов", text)
+        self.assertIn("872 000", text)
+        self.assertIn("вход: текст, изображения", text)
+        self.assertIn("предел истории задаются настройками чата", text)
+
+    def test_slow_catalog_does_not_delay_later_stop_or_change_captured_model(self):
+        """Медленная справка не мешает позднему /stop и сохраняет выбор на момент запроса."""
+        for offset, command in enumerate(("/models task", "/efforts task")):
+            with self.subTest(command=command):
+                bridge = self.bridge
+                bridge._control_active_thread = 100
+                bridge._begin_job(100, 150 + offset, "job-" + str(offset), True)
+                bridge._model_command(100, "task captured-model high")
+                started, release = threading.Event(), threading.Event()
+                foreground = threading.get_ident()
+                source = {**bridge._worker_models.return_value, "models": [
+                    {"id": "captured-model", "is_default": False, "reasoning_efforts": ["high"],
+                     "default_reasoning_effort": "high"},
+                    {"id": "new-model", "is_default": False, "reasoning_efforts": ["low"],
+                     "default_reasoning_effort": "low"},
+                ]}
+                def slow_catalog(*args, **kwargs):
+                    """Задержать только HTTP-замену и проверить отделение от SQLite-потока."""
+                    self.assertNotEqual(threading.get_ident(), foreground)
+                    started.set()
+                    self.assertTrue(release.wait(3))
+                    return source
+                bridge._worker_models.reset_mock()
+                bridge._worker_models.side_effect = slow_catalog
+                bridge._worker_job_control.return_value = {"state": "cancelled"}
+                stamp = 400 + offset * 10
+                message = {"text": command, "author_guid": "human"}
+                bridge.messenger.new_messages.return_value = [(stamp, message)]
+                try:
+                    bridge._poll_commands(100, 150)
+                    self.assertTrue(started.wait(1))
+                    self.assertFalse(release.is_set())
+                    # Смена модели и следующий poll выполняются, пока RPC справки ещё ждёт.
+                    bridge._model_command(100, "task new-model low")
+                    bridge.messenger.new_messages.return_value = [
+                        (stamp, message),
+                        (stamp + 1, {"text": "ordinary followup", "author_guid": "human"}),
+                        (stamp + 2, {"text": "/stop", "author_guid": "human"}),
+                    ]
+                    bridge._poll_commands(100, 150)
+                    self.assertEqual(bridge._worker_models.call_count, 1)
+                    self.assertEqual(bridge._worker_job_control.call_args.kwargs["action"], "cancel")
+                    self.assertFalse(release.is_set())
+                    self.assertIsNone(bridge.db.execute(
+                        "SELECT result FROM chat_commands WHERE incoming=?", (stamp,)).fetchone()[0])
+                    bridge._draft.assert_not_called()
+                    bridge._task.assert_not_called()
+                    bridge._control_active_thread = None
+                    # Повтор receipt после завершения задачи также не создаёт второй fetch.
+                    bridge._handle_command(100, stamp, message, command.split()[0][1:])
+                    self.assertEqual(bridge._worker_models.call_count, 1)
+                    release.set()
+                    future = bridge._catalog_pending[(100, stamp)][0]
+                    future.result(timeout=2)
+                    send_threads = []
+                    bridge.messenger.send.side_effect = lambda *a, **k: send_threads.append(threading.get_ident()) or 777
+                    with patch.object(Bridge, "poll", return_value=None):
+                        bridge.poll()
+                    result = bridge.db.execute("SELECT result FROM chat_commands WHERE incoming=?", (stamp,)).fetchone()[0]
+                    self.assertIn("captured-model", result)
+                    self.assertNotIn("`new-model` — выбрана", result)
+                    if command.startswith("/efforts"):
+                        self.assertNotIn("Выбранная модель: `new-model`", result)
+                        self.assertIn("Выбранная модель: `captured-model`", result)
+                    self.assertEqual(send_threads, [foreground])
+                    sent = bridge.messenger.send.call_count
+                    bridge._flush_catalog_commands()
+                    bridge._handle_command(100, stamp, message, command.split()[0][1:])
+                    self.assertEqual(bridge.messenger.send.call_count, sent)
+                    self.assertEqual(bridge._worker_models.call_count, 1)
+                finally:
+                    release.set()
+                    bridge.messenger.send.side_effect = None
+                    bridge._catalog_executor.shutdown(wait=True)
+                    del bridge._catalog_executor
+                    bridge._worker_job_control.reset_mock()
+
+    def test_catalog_queue_is_bounded_and_batch_stop_precedes_fetch(self):
+        """Два фоновых HTTP-потока и восемь receipts не лишают /stop приоритета."""
+        bridge = self.bridge
+        bridge._control_active_thread = 100
+        bridge._begin_job(100, 150, "job", True)
+        release, two_started = threading.Event(), threading.Event()
+        lock = threading.Lock()
+        events = []
+        def fetch(*args, **kwargs):
+            """Сдержать первые два RPC, чтобы проверить реальную границу concurrency."""
+            with lock:
+                events.append("fetch")
+                if events.count("fetch") == 2:
+                    two_started.set()
+            self.assertTrue(release.wait(3))
+            return bridge._worker_models.return_value
+        def stop(*args, **kwargs):
+            """Отметить момент реального control RPC относительно загрузок справки."""
+            events.append("stop")
+            return {"state": "cancelled"}
+        bridge._worker_models.side_effect = fetch
+        bridge._worker_job_control.side_effect = stop
+        bridge.messenger.new_messages.return_value = [
+            *[(200 + index, {"text": "/models task", "author_guid": "human"}) for index in range(9)],
+            (220, {"text": "/stop", "author_guid": "human"}),
+        ]
+        try:
+            bridge._poll_commands(100, 150)
+            self.assertTrue(two_started.wait(1))
+            self.assertEqual(events[0], "stop")
+            self.assertEqual(events.count("fetch"), 2)
+            self.assertEqual(len(bridge._catalog_pending), 8)
+            rejection = bridge.db.execute("SELECT result FROM chat_commands WHERE incoming=208").fetchone()[0]
+            self.assertIn("уже загружается", rejection)
+            self.assertNotIn("token", rejection)
+            release.set()
+            for future, _, _ in bridge._catalog_pending.values():
+                future.result(timeout=2)
+            bridge._flush_catalog_commands()
+            self.assertEqual(len(bridge._catalog_pending), 0)
+            self.assertEqual(events.count("fetch"), 8)
+        finally:
+            release.set()
+            bridge._catalog_executor.shutdown(wait=True)
+
+    def test_catalog_result_is_saved_before_delivery_and_retried_without_refetch(self):
+        """Потеря доставки сохраняет ответ receipt и не меняет его после /model."""
+        bridge = self.bridge
+        bridge._control_active_thread = 100
+        bridge._model_command(100, "task configured-model high")
+        bridge._worker_models.return_value["models"][0]["id"] = "configured-model"
+        bridge._handle_command(100, 200, {"text": "/efforts task"}, "efforts")
+        try:
+            bridge._catalog_pending[(100, 200)][0].result(timeout=2)
+            original_send = bridge._send_command_result
+            with patch.object(bridge, "_send_command_result", side_effect=RuntimeError("synthetic delivery failure")):
+                bridge._flush_catalog_commands()
+            saved = bridge.db.execute("SELECT result FROM chat_commands WHERE incoming=200").fetchone()[0]
+            self.assertIn("Выбранная модель: `configured-model`", saved)
+            bridge._model_command(100, "task different-model low")
+            with patch.object(bridge, "_send_command_result", wraps=original_send) as send:
+                bridge._flush_catalog_commands()
+                self.assertEqual(send.call_args.args[2], saved)
+                self.assertEqual(threading.get_ident(), threading.main_thread().ident)
+            bridge._worker_models.assert_called_once()
+            self.assertFalse(bridge._catalog_pending)
+        finally:
+            bridge._catalog_executor.shutdown(wait=True)
+
+    def test_catalog_snapshot_recovers_after_process_state_is_lost_without_storing_credentials(self):
+        """Restart восстанавливает выбор модели, но берёт connection из текущего профиля."""
+        bridge = self.bridge
+        bridge._control_active_thread = 100
+        bridge._model_command(100, "task captured-model high")
+        bridge._worker_models.return_value["models"][0]["id"] = "captured-model"
+        connection = {"endpoint": "https://worker.example.test/job", "transport_token": "synthetic-private-token", "ca_file": "/private/ca"}
+        with patch.object(bridge, "_job_route", return_value=connection):
+            bridge._handle_command(100, 200, {"text": "/efforts task"}, "efforts")
+            bridge._catalog_pending[(100, 200)][0].result(timeout=2)
+            bridge._catalog_executor.shutdown(wait=True)
+            del bridge._catalog_pending
+            del bridge._catalog_executor
+            stored = bridge.db.execute("SELECT catalog_snapshot FROM chat_commands WHERE incoming=200").fetchone()[0]
+            self.assertIn("captured-model", stored)
+            for private in ("synthetic-private-token", "worker.example.test", "/private/ca", "connection"):
+                self.assertNotIn(private, stored)
+            bridge._control_active_thread = None
+            bridge._model_command(100, "task changed-model low")
+            try:
+                with patch.object(Bridge, "poll", return_value=None):
+                    bridge.poll()
+                pending = bridge._catalog_pending.get((100, 200))
+                if pending is not None:
+                    pending[0].result(timeout=2)
+                    bridge._flush_catalog_commands()
+                saved = bridge.db.execute("SELECT result,catalog_snapshot FROM chat_commands WHERE incoming=200").fetchone()
+                self.assertIn("Выбранная модель: `captured-model`", saved[0])
+                self.assertIsNone(saved[1])
+                self.assertEqual(bridge._worker_models.call_count, 2)
+            finally:
+                bridge._catalog_executor.shutdown(wait=True)
+
+    def test_catalog_delivery_retry_survives_restart_without_new_http(self):
+        """Сохранённый ответ после сбоя доставки восстанавливается напрямую из receipt."""
+        bridge = self.bridge
+        bridge._control_active_thread = 100
+        bridge._worker_models.return_value["models"][0]["id"] = "configured-model"
+        bridge._handle_command(100, 200, {"text": "/efforts task"}, "efforts")
+        bridge._catalog_pending[(100, 200)][0].result(timeout=2)
+        try:
+            with patch.object(bridge, "_send_command_result", side_effect=RuntimeError("synthetic delivery failure")):
+                bridge._flush_catalog_commands()
+            saved = bridge.db.execute("SELECT result,catalog_snapshot FROM chat_commands WHERE incoming=200").fetchone()
+            self.assertIsNotNone(saved[0])
+            self.assertIsNotNone(saved[1])
+            bridge._catalog_executor.shutdown(wait=True)
+            del bridge._catalog_pending
+            del bridge._catalog_executor
+            bridge._control_active_thread = None
+            with patch.object(Bridge, "poll", return_value=None):
+                bridge.poll()
+            self.assertEqual(bridge.messenger.send.call_args.args[1], saved[0])
+            self.assertIsNone(bridge.db.execute("SELECT catalog_snapshot FROM chat_commands WHERE incoming=200").fetchone()[0])
+            bridge._worker_models.assert_called_once()
+        finally:
+            executor = getattr(bridge, "_catalog_executor", None)
+            if executor is not None:
+                executor.shutdown(wait=True)
 
     def test_effort_during_active_job_changes_only_next_uuid_options(self):
         """Polling применяет effort к следующему UUID; replay активного сохраняет исходные опции."""

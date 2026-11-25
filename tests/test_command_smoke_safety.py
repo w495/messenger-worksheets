@@ -7,6 +7,7 @@ import importlib.util
 from io import StringIO
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 import unittest
@@ -47,7 +48,7 @@ class CommandSmokeSafetyTest(unittest.TestCase):
             if mode == "plan":
                 return {"text": "bwrap: loopback failure", "files": [], "session": None}
             if mode == "review":
-                marker = base64.b64decode(job["history_files"][0]["data"]).decode().splitlines()[0][2:]
+                marker = re.search(r"def ([a-z_]+)\(", base64.b64decode(job["history_files"][0]["data"]).decode())[1]
                 return {"text": marker, "files": [], "session": None}
             if not stopped.wait(2):
                 raise RuntimeError("test cancellation did not arrive")
@@ -73,6 +74,17 @@ class CommandSmokeSafetyTest(unittest.TestCase):
         self.assertIn("category=bwrap_loopback", output.getvalue())
         self.assertIn("worker_review_smoke_ok", output.getvalue())
         self.assertIn("worker_cancel_smoke_ok terminal=cancelled", output.getvalue())
+
+    def test_read_proof_is_code_identifier_available_only_inside_file(self):
+        """Проверка требует относящееся к дефекту имя функции, а не непрозрачный служебный token."""
+        for mode in ("plan", "review"):
+            job, symbol = self.module.readonly_smoke_job(mode)
+            source = base64.b64decode(job["history_files"][0]["data"]).decode()
+            self.assertIn(f"def {symbol}(x):", source)
+            self.assertNotIn(symbol, job["text"])
+            self.assertNotIn(symbol, job["history_files"][0]["name"])
+            self.assertNotIn("READONLY_OK", source)
+            self.assertEqual(job["options"]["mode"], mode)
 
 
 if __name__ == "__main__":
