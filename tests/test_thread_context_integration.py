@@ -96,6 +96,26 @@ class ThreadContextIntegrationTest(unittest.TestCase):
         self.assertFalse(result["_thread_context"]["task"])
         self.messenger.context_messages.assert_not_called()
 
+    def test_known_answer_chunks_are_preserved_even_when_text_looks_like_progress(self):
+        """Подтверждённая часть модельного ответа не теряется из истории из-за текста «Готово»."""
+        first = "00000000-0000-0000-0000-000000000777"
+        second = "00000000-0000-0000-0000-000000000778"
+        status = "00000000-0000-0000-0000-000000000779"
+        with self.database:
+            self.database.execute("INSERT INTO updates(parent,incoming,stage,payload,sent) VALUES(100,100,'answer-part-1',?,1)", (first,))
+            self.database.execute("INSERT INTO replies(parent,incoming,payload,draft) VALUES(100,101,?,NULL)", (second,))
+            self.database.execute("INSERT INTO updates(parent,incoming,stage,payload,sent) VALUES(100,102,'command',?,1)", (status,))
+        self.messenger.context_messages.return_value = [
+            (100, {"text": "Исходный запрос", "author_guid": "human"}),
+            (110, {"text": "\n\n✅ Готово.", "author_guid": "service", "payload_id": first}),
+            (120, {"text": "✅ Готово.", "author_guid": "service", "payload_id": second}),
+            (130, {"text": "✅ Готово.", "author_guid": "service", "payload_id": status}),
+            (140, {"text": "✅ Готово.", "author_guid": "service"}),
+        ]
+        result = self.bridge._prepare_thread_context(100, 200, {"text": "Уточнение"})
+        self.assertEqual([item["text"] for item in result["_thread_context"]["messages"]],
+                         ["Исходный запрос", "\n\n✅ Готово.", "✅ Готово."])
+
     def test_cancelled_job_has_explicit_terminal_status_without_success(self):
         """Подтверждённая отмена не выдаётся за успех или неизвестную ошибку и не запускает модель повторно."""
         self.bridge._draft.side_effect = CodexTurnError("worker_cancelled")

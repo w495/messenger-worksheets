@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date
 import hashlib
 import html
 import json
@@ -255,6 +256,104 @@ def _safe_effort(value: object) -> str | None:
     return value if isinstance(value, str) and value in EFFORTS else None
 
 
+
+def _created_timestamp(value: object) -> int | float | None:
+    """Проверить реальный API created без преобразования строк, bool или дат из имени.
+
+    Принимает недоверенное значение эпохи Unix. Возвращает только положительный
+    конечный int/float в диапазоне календаря до 9999 года, иначе None. NaN,
+    бесконечности, отрицательные значения и bool не задают приоритет. Сеть, ФС
+    и исходное значение не меняются; поле остаётся внутренним для сортировки.
+    """
+    return value if type(value) in (int, float) and 0 < value <= 253402300799 else None
+
+
+def _entry_timestamp(entry: dict) -> int | float | None:
+    """Получить дату API записи: достоверный created, затем только явный ISO suffix.
+
+    Принимает уже отфильтрованную API запись с безопасным id. Сначала использует
+    проверенный created; если его нет, разбирает конечный YYYY-MM-DD и проверяет
+    реальность календарной даты. Число поколения не превращает в дату. Возвращает
+    Unix epoch либо None; сеть, schema ответа и исходный dict не изменяются.
+    """
+    created = _created_timestamp(entry.get("created"))
+    if created is not None:
+        return created
+    suffix = re.search(r"-(\d{4}-\d{2}-\d{2})$", entry["id"])
+    if suffix is None:
+        return None
+    try:
+        timestamp = (date.fromisoformat(suffix[1]) - date(1970, 1, 1)).days * 86400
+        return timestamp if timestamp > 0 else None
+    except ValueError:
+        return None
+
+
+def _gpt_generation(identifier: str) -> tuple[int, ...] | None:
+    """Разобрать числовое поколение GPT естественно: 5.10 новее 5.9, 6.2 новее 6.
+
+    Параметр identifier — проверенный ID. Возвращает tuple целых компонентов
+    только после префикса gpt-; завершающие нули не создают отдельное поколение.
+    Иные семейства возвращают None: o4 и gpt-4 по номеру не сравниваются.
+    Функция не выводит релизную дату из имени и не выполняет ввод-вывод.
+    """
+    match = re.match(r"gpt-(\d+(?:\.\d+)*)", identifier)
+    if match is None:
+        return None
+    generation = [int(part) for part in match[1].split(".")]
+    while len(generation) > 1 and generation[-1] == 0:
+        generation.pop()
+    return tuple(generation)
+
+
+def _generation_order(entries: list[dict], *, native: bool) -> list[dict]:
+    """Упорядочить только GPT позиции, сохранив provider priority прочих семейств.
+
+    Принимает уникальные eligible записи в исходном порядке и тип каталога.
+    Возвращает новую последовательность: GPT поколения по убыванию, одинаковые
+    поколения устойчиво в порядке provider; неизвестные семейства остаются на
+    своих позициях. Не сравнивает номера o-моделей с GPT и не создаёт даты.
+    Исходные записи, внешнее состояние и публичную schema не изменяет.
+    """
+    key = "slug" if native else "id"
+    positions = [index for index, entry in enumerate(entries) if _gpt_generation(entry[key]) is not None]
+    ranked = sorted((entries[index] for index in positions), key=lambda entry: _gpt_generation(entry[key]), reverse=True)
+    ordered = list(entries)
+    for index, entry in zip(positions, ranked):
+        ordered[index] = entry
+    return ordered
+
+
+def _ordered_entries(entries: list[dict], *, native: bool) -> list[dict]:
+    """Отсортировать и устранить дубли до проекции и лимитов публичного каталога.
+
+    Принимает eligible записи с проверенными ID. Native сортирует GPT поколения,
+    сохраняя priority внутри поколения и порядок неизвестных семейств. API ставит
+    датированные записи первыми по created/ISO suffix убыванию вне зависимости от
+    семейства; недатированный остаток использует естественный GPT порядок.
+    Для дубля API выбирает наиболее новый достоверный created; при равенстве или
+    отсутствии created сохраняет первую запись provider. Native сохраняет первый
+    дубль. Сырьевые даты не выходят в schema, список не мутируется, I/O отсутствует.
+    """
+    key = "slug" if native else "id"
+    unique = {}
+    for entry in entries:
+        identifier = entry[key]
+        previous = unique.get(identifier)
+        if previous is None:
+            unique[identifier] = entry
+        elif not native:
+            current_date = _created_timestamp(entry.get("created"))
+            previous_date = _created_timestamp(previous.get("created"))
+            if current_date is not None and (previous_date is None or current_date > previous_date):
+                unique[identifier] = entry
+    candidates = list(unique.values())
+    if native:
+        return _generation_order(candidates, native=True)
+    dated = [entry for entry in candidates if _entry_timestamp(entry) is not None]
+    undated = [entry for entry in candidates if _entry_timestamp(entry) is None]
+    return sorted(dated, key=_entry_timestamp, reverse=True) + _generation_order(undated, native=False)
+
 def _project(entries: object, *, native: bool, configured: str | None) -> tuple[list[dict], bool]:
     """Построить ограниченную публичную проекцию недоверенного списка моделей.
 
@@ -266,10 +365,14 @@ def _project(entries: object, *, native: bool, configured: str | None) -> tuple[
     cached helper с ограниченным обновлением индекса, без запросов к каждой
     модели. CatalogFailure означает неверный корневой тип. Число и полный размер
     результата ограничены MAX_MODELS и MAX_PUBLIC_BYTES; raw инструкции исключены.
+    Сырьевые eligible записи дедуплицируются и сортируются до обогащения и лимитов,
+    чтобы старые элементы не вытесняли более новые при усечении. Даты в schema
+    не добавляются; порядок готового списка сохраняет _bounded_models.
     """
     if not isinstance(entries, list):
         raise CatalogFailure("invalid_response")
     models = {}
+    eligible = []
     excluded = ("embedding", "audio", "image", "transcrib", "whisper", "tts", "realtime", "search", "moderation", "dall-e", "sora")
     for entry in entries:
         if not isinstance(entry, dict) or (native and entry.get("visibility") != "list"):
@@ -280,6 +383,9 @@ def _project(entries: object, *, native: bool, configured: str | None) -> tuple[
         if not native and (not re.match(r"(?:gpt-|o[1-9](?:[.-]|$))", identifier)
                            or any(word in identifier.casefold() for word in excluded)):
             continue
+        eligible.append(entry)
+    for entry in _ordered_entries(eligible, native=native):
+        identifier = entry["slug" if native else "id"]
         details = _details(entry, native=native)
         levels = entry.get("supported_reasoning_levels", [])
         efforts = {effort for item in levels if isinstance(item, dict)
@@ -317,7 +423,7 @@ def _project(entries: object, *, native: bool, configured: str | None) -> tuple[
         models[identifier] = {"id": identifier, "is_default": identifier == configured,
                               "reasoning_efforts": [item for item in EFFORTS if item in efforts],
                               "default_reasoning_effort": default, **details}
-    return _bounded_models([models[identifier] for identifier in sorted(models)])
+    return _bounded_models(list(models.values()))
 
 
 def _native_output(binary: str) -> bytes:

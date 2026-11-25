@@ -10,6 +10,8 @@ import re
 import time
 
 from messenger_codex.bridge import strip_prompt_comments
+from .model_presentation import CATALOG_PAGE_BREAK, catalogue_pages
+from .text_messages import MAX_MESSAGE_UNITS, split_messages, utf16_length
 
 
 COMMANDS = frozenset({"stop", "status", "reset", "help", "model", "models", "effort", "efforts", "plan", "review"})
@@ -126,7 +128,7 @@ class ChatCommandMixin:
         """)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(chat_commands)")}
         with self.db:
-            for column, sql_type in (("stop_job_id", "TEXT"), ("stop_task", "INTEGER"), ("catalog_snapshot", "TEXT")):
+            for column, sql_type in (("stop_job_id", "TEXT"), ("stop_task", "INTEGER"), ("catalog_snapshot", "TEXT"), ("delivery_parts", "TEXT")):
                 if column not in columns:
                     self.db.execute(f"ALTER TABLE chat_commands ADD COLUMN {column} {sql_type}")
             job_columns = {row[1] for row in self.db.execute("PRAGMA table_info(chat_jobs)")}
@@ -653,82 +655,45 @@ class ChatCommandMixin:
 
         Необязательный аргумент chat/task выбирает один маршрут; другие значения
         возвращают usage без сети. Сбой одного worker не скрывает второй список.
-        Имена и уровни предварительно проверены RPC schema. Каталог не является
-        проверкой доступа к каждой модели и так обозначается участникам.
+        Renderer сохраняет новый порядок backend, объединяет равные официальные
+        версии и строит страницы до трёх карточек/4096 UTF-16. Страницы соединены
+        внутренним Markdown-разделителем, который доставка удаляет. Каталог не
+        доказывает доступ к каждой модели; БД здесь не меняется.
         """
         prepared = prepared if prepared is not None else self._prepare_catalog_command(thread, "models", arguments)
         if prepared.get("usage"):
             return prepared["usage"]
         fetched = fetched if fetched is not None else self._fetch_catalog_command(prepared)
-        lines = []
+        pages = []
         for snapshot, response in zip(prepared["routes"], fetched):
             task = snapshot["task"]
             label = "Обычные ответы" if not task else "/task, /plan, /review"
-            if lines:
-                lines.append("")
-            lines.append(label + ":")
             try:
                 catalog = response["catalog"]
                 if catalog is None:
                     raise ValueError("catalog unavailable")
                 if not catalog["available"]:
-                    lines.append("Каталог сейчас недоступен. Повторите /models позже.")
+                    pages.append(label + ":\n\nКаталог сейчас недоступен. Повторите /models позже.")
                     continue
-                source = "OpenAI Models API" if catalog["source"] == "openai_models_api" else "Codex CLI"
-                lines.append("Источник: " + source + ".")
                 options = snapshot["options"]
                 current = options.get("model")
-                for item in catalog["models"]:
-                    chosen = item["id"] == current if current else item["is_default"]
-                    line = "• `" + item["id"] + "`" + (" — выбрана" if chosen else "")
-                    if item["reasoning_efforts"]:
-                        line += "; размышления: " + ", ".join(item["reasoning_efforts"])
-                    lines.append(line)
-                    description = item.get("description")
-                    lines.append("  Назначение: " + catalog_display_text(description) if description else "  Назначение: источник не сообщил описание.")
-                    features = []
-                    context = item.get("context_window")
-                    maximum = item.get("max_context_window")
-                    if context:
-                        features.append("контекст модели " + f"{context:,}".replace(",", " ") + " токенов")
-                    if maximum and maximum != context:
-                        features.append("максимум в каталоге " + f"{maximum:,}".replace(",", " "))
-                    modalities = {"text": "текст", "image": "изображения", "audio": "аудио", "video": "видео"}
-                    if item.get("input_modalities"):
-                        features.append("вход: " + ", ".join(modalities[value] for value in item["input_modalities"]))
-                    if features:
-                        lines.append("  Особенности: " + "; ".join(features) + ".")
-                    elif not item["reasoning_efforts"]:
-                        lines.append("  Особенности: подробные характеристики источник не сообщил.")
-                    if item.get("details_url"):
-                        lines.append("  Карточка: " + item["details_url"])
-                if not catalog["models"]:
-                    lines.append("Провайдер не вернул текстовых моделей.")
-                if current and not any(item["id"] == current for item in catalog["models"]):
-                    lines.append("Выбрана `" + current + "`; в этом каталоге её нет.")
-                if catalog["truncated"]:
-                    lines.append("Каталог показан не полностью из-за лимита размера ответа.")
-                if catalog["source"] == "openai_models_api":
-                    lines.append("Описания и уровни дополняются по официальной документации: Models API их не перечисляет.")
+                pages.extend(catalogue_pages(catalog, task=task, current=current, plain=catalog_display_text))
             except Exception:
-                lines.append("Не удалось получить каталог моделей. Повторите /models позже.")
-        lines.append("\nСписок получен из каталога. Доступ к конкретной модели проверяется при запуске.")
-        lines.append("Выбор: /model [chat|task] имя [уровень].")
-        lines.append("Особенности относятся к модели; доступные инструменты и предел истории задаются настройками чата.")
-        return "\n".join(lines)
+                pages.append(label + ":\n\nНе удалось получить каталог моделей. Повторите /models позже.")
+        return CATALOG_PAGE_BREAK.join(pages)
 
-    def _send_command_result(self, parent: int, stamp: int, text: str) -> None:
-        """Доставить полный ответ команды безопасными идемпотентными частями.
+    @staticmethod
+    def _legacy_command_parts(text: str) -> tuple[str, ...]:
+        """Восстановить старое разбиение только для проверки уже доставленных receipts.
 
-        Короткий ответ сохраняет прежний stage command. Длинный каталог делится
-        по строкам на сообщения до 5000 символов; stage каждой части стабилен.
-        Повтор после сбоя отправляет только недоставленные части и не вызывает
-        модель. Ошибки доставки передаются, сохраняя receipt команды в SQLite.
+        Использует прежние 6000/5000 символов, но ничего не отправляет. Это
+        позволяет не дублировать полностью завершённые ответы после обновления
+        лимита до 4096. Частично доставленная старая справка не переотправляется
+        с другими телами под прежними UUID: пользователь получает короткое
+        предложение повторить команду. ФС и сеть не используются.
         """
-        destination = self._delivery_parent(parent, stamp)
         if len(text) <= 6000:
-            self.status(parent, stamp, "command", text, delivery_parent=destination)
-            return
+            return (text,)
         chunks, current = [], ""
         for line in text.splitlines(keepends=True):
             if len(current) + len(line) > 5000 and current:
@@ -740,8 +705,42 @@ class ChatCommandMixin:
             current += line
         if current:
             chunks.append(current)
-        for index, chunk in enumerate(chunks):
-            self.status(parent, stamp, f"command-{index}", chunk, delivery_parent=destination)
+        return tuple(chunks)
+
+    def _send_command_result(self, parent: int, stamp: int, text: str) -> None:
+        """Доставить полный ответ команды безопасными идемпотентными частями.
+
+        Лимит каждой части — 4096 единиц UTF-16. Страницы каталога сохраняются
+        отдельными сообщениями. План частей фиксируется в SQLite до отправки;
+        подтверждённые UUID не повторяются. Пустой план означает завершённую
+        доставку. Старые завершённые receipts распознаются без новых сообщений,
+        частичная старая справка получает безопасное предложение повторить
+        команду. Модель не вызывается; ошибки доставки сохраняют план для retry.
+        """
+        destination = self._delivery_parent(parent, stamp)
+        row = self.db.execute("SELECT delivery_parts FROM chat_commands WHERE parent=? AND incoming=?", (parent, stamp)).fetchone()
+        parts = json.loads(row[0]) if row and row[0] is not None else None
+        if parts is None:
+            legacy = dict(self.db.execute("SELECT stage,sent FROM updates WHERE parent=? AND incoming=? AND (stage='command' OR stage GLOB 'command-[0-9]*')", (parent, stamp)))
+            if legacy:
+                old = self._legacy_command_parts(text)
+                expected = ("command",) if len(old) == 1 else tuple(f"command-{index}" for index in range(len(old)))
+                if all(legacy.get(stage) == 1 for stage in expected):
+                    with self.db:
+                        self.db.execute("UPDATE chat_commands SET delivery_parts='[]' WHERE parent=? AND incoming=?", (parent, stamp))
+                    return
+                text = "Формат справки обновлён. Повторите команду, чтобы получить полный компактный ответ."
+                with self.db:
+                    self.db.execute("UPDATE chat_commands SET result=? WHERE parent=? AND incoming=?", (text, parent, stamp))
+            parts = [part for page in text.split(CATALOG_PAGE_BREAK) for part in split_messages(page)]
+            with self.db:
+                self.db.execute("UPDATE chat_commands SET delivery_parts=? WHERE parent=? AND incoming=?", (json.dumps(parts, ensure_ascii=False), parent, stamp))
+        if not isinstance(parts, list) or len(parts) > 1024 or any(not isinstance(part, str) or not part or utf16_length(part) > MAX_MESSAGE_UNITS for part in parts):
+            raise ValueError("invalid persisted command delivery plan")
+        for index, chunk in enumerate(parts):
+            self.status(parent, stamp, f"command4096-{index}", chunk, delivery_parent=destination)
+        with self.db:
+            self.db.execute("UPDATE chat_commands SET delivery_parts='[]' WHERE parent=? AND incoming=?", (parent, stamp))
 
     def _handle_command(self, parent: int, stamp: int, message: dict, command: str) -> None:
         """Идемпотентно выполнить одну команду и отправить служебный ответ в тред.

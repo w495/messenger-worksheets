@@ -60,7 +60,7 @@ systemd-analyze verify \
     "${deployment_dir}/worksheet-gateway-bot.service"
 # Production modules и units копируются root-owned, затем legacy aggregate
 # gateway выключается: одному chat никогда не должны владеть два polling writer.
-for module in bot_api.py bot_gateway.py codex_rpc.py codex_worker.py model_http.py model_cards.py model_catalog.py personal_messenger.py worksheet.py thread_context.py chat_commands.py request_options.py process_supervisor.py; do
+for module in bot_api.py bot_gateway.py codex_rpc.py codex_worker.py model_http.py model_cards.py model_catalog.py model_presentation.py text_messages.py personal_messenger.py worksheet.py thread_context.py chat_commands.py request_options.py process_supervisor.py; do
     install -m 0644 -o root -g root \
         "${repo_root}/messenger-worksheets/messenger_worksheets/${module}" \
         "/opt/messenger-worksheets/app/messenger_worksheets/${module}"

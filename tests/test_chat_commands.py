@@ -19,6 +19,7 @@ os.environ.setdefault("WORKSHEET_MESSENGER_EMAIL", "user@example.test")
 from messenger_codex.bridge import Bridge, CodexTurnError
 from messenger_worksheets.chat_commands import chat_command, parse_chat_command
 from messenger_worksheets.cloud_gateway import CloudBridge
+from messenger_worksheets.text_messages import utf16_length
 
 
 class ChatCommandsTest(unittest.TestCase):
@@ -84,15 +85,15 @@ class ChatCommandsTest(unittest.TestCase):
     def test_models_show_both_routes_and_reasoning_without_model_call(self):
         """Каталоги берутся у двух worker, команда не попадает в модель и не повторяет fetch при replay."""
         self.command("/models")
-        text = self.bridge.messenger.send.call_args.args[1]
+        text = "\n".join(call.args[1] for call in self.bridge.messenger.send.call_args_list)
         self.assertIn("Обычные ответы", text)
         self.assertIn("/task, /plan, /review", text)
         self.assertIn("`listed-model` — выбрана", text)
-        self.assertIn("low, high", text)
+        self.assertIn("low · high", text)
         self.assertIn("из каталога", text)
         self.command("/models")
         self.assertEqual(self.bridge._worker_models.call_count, 2)
-        self.assertEqual(self.bridge.messenger.send.call_count, 1)
+        self.assertEqual(self.bridge.messenger.send.call_count, 2)
         self.bridge._draft.assert_not_called()
         self.bridge._task.assert_not_called()
 
@@ -101,7 +102,7 @@ class ChatCommandsTest(unittest.TestCase):
         valid = self.bridge._worker_models.return_value
         self.bridge._worker_models.side_effect = [RuntimeError("private diagnostic"), valid]
         self.command("/models")
-        text = self.bridge.messenger.send.call_args.args[1]
+        text = "\n".join(call.args[1] for call in self.bridge.messenger.send.call_args_list)
         self.assertIn("Не удалось", text)
         self.assertIn("listed-model", text)
         self.assertNotIn("private diagnostic", text)
@@ -122,13 +123,67 @@ class ChatCommandsTest(unittest.TestCase):
         count = self.bridge.messenger.send.call_count
         self.assertGreater(count, 1)
         parts = [call.args[1] for call in self.bridge.messenger.send.call_args_list]
-        self.assertTrue(all(len(part) <= 5000 for part in parts))
+        self.assertTrue(all(utf16_length(part) <= 4096 for part in parts))
         joined = "".join(parts)
         for item in models:
             self.assertIn(item["id"], joined)
         self.command("/models task")
         self.assertEqual(self.bridge.messenger.send.call_count, count)
         self.bridge._worker_models.assert_called_once()
+
+    def test_catalog_pages_remain_independent_even_when_combined_text_fits_limit(self):
+        """Два коротких режима остаются двумя страницами, а не склеиваются обратно в простыню."""
+        self.command("/models")
+        self.assertEqual(self.bridge.messenger.send.call_count, 2)
+        for call in self.bridge.messenger.send.call_args_list:
+            self.assertNotIn("\n\n---\n\n", call.args[1])
+            self.assertLessEqual(utf16_length(call.args[1]), 4096)
+
+    def test_partial_catalog_delivery_retry_keeps_original_page_text_and_uuid(self):
+        """После потери ACK повтор использует замороженные страницы и не повторяет fetch или первые сообщения."""
+        self.bridge._worker_models.return_value["models"] = [
+            {"id": f"gpt-6.{index}", "is_default": False, "description": "🧠" * 600,
+             "reasoning_efforts": ["low", "high"], "default_reasoning_effort": "low"}
+            for index in range(8)
+        ]
+        self.bridge.messenger.send.side_effect = [777, RuntimeError("lost acknowledgement")]
+        with self.assertRaisesRegex(RuntimeError, "lost acknowledgement"):
+            self.command("/models task")
+        first, interrupted = self.bridge.messenger.send.call_args_list
+        self.bridge._worker_models.return_value["models"] = []
+        self.bridge.messenger.send.side_effect = None
+        self.command("/models task")
+        calls = self.bridge.messenger.send.call_args_list
+        self.assertEqual(calls[2].args, interrupted.args)
+        self.assertEqual(sum(call.args == first.args for call in calls), 1)
+        self.assertTrue(all(utf16_length(call.args[1]) <= 4096 for call in calls))
+        self.bridge._worker_models.assert_called_once()
+        count = len(calls)
+        self.command("/models task")
+        self.assertEqual(self.bridge.messenger.send.call_count, count)
+
+    def test_legacy_completed_long_response_is_not_delivered_again_after_limit_change(self):
+        """Старый подтверждённый ответ остаётся историческим, обновление не создаёт его дубли."""
+        with self.bridge.db:
+            self.bridge.db.execute("INSERT INTO chat_commands(parent,incoming,thread,name,result) VALUES(100,200,100,'models',?)", ("x" * 5000,))
+        self.bridge.status(100, 200, "command", "historical confirmed reply", delivery_parent=100)
+        self.bridge.messenger.send.reset_mock()
+        self.command("/models")
+        self.bridge.messenger.send.assert_not_called()
+        self.bridge._worker_models.assert_not_called()
+
+    def test_incomplete_legacy_catalog_gets_safe_short_refresh_notice(self):
+        """Неизвестный исход старой длинной части не переотправляется под новым телом и UUID."""
+        with self.bridge.db:
+            self.bridge.db.execute("INSERT INTO chat_commands(parent,incoming,thread,name,result) VALUES(100,200,100,'models',?)", ("x" * 11000,))
+        self.bridge.status(100, 200, "command-0", "historical first page", delivery_parent=100)
+        self.bridge.messenger.send.reset_mock()
+        self.command("/models")
+        self.assertEqual(self.bridge.messenger.send.call_count, 1)
+        self.assertIn("Повторите команду", self.bridge.messenger.send.call_args.args[1])
+        self.command("/models")
+        self.assertEqual(self.bridge.messenger.send.call_count, 1)
+        self.bridge._worker_models.assert_not_called()
 
     def test_reset_clears_only_requested_thread_and_native_session(self):
         """Сброс передаёт точный тред/cutoff и возвращает None для native session."""
@@ -384,11 +439,11 @@ class ChatCommandsTest(unittest.TestCase):
                     max_context_window=872000, input_modalities=["text", "image"])
         self.command("/models task")
         text = self.bridge.messenger.send.call_args.args[1]
-        self.assertIn("Назначение: Быстрая модель для программирования", text)
+        self.assertIn("Для чего: Быстрая модель для программирования", text)
         self.assertIn("500 000 токенов", text)
         self.assertIn("872 000", text)
-        self.assertIn("вход: текст, изображения", text)
-        self.assertIn("предел истории задаются настройками чата", text)
+        self.assertIn("Вход: текст, изображения", text)
+        self.assertIn("Предел истории и инструменты задаются настройками чата", text)
 
     def test_slow_catalog_does_not_delay_later_stop_or_change_captured_model(self):
         """Медленная справка не мешает позднему /stop и сохраняет выбор на момент запроса."""

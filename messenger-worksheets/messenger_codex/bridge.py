@@ -19,6 +19,8 @@ import uuid
 from collections.abc import Callable
 from urllib.error import HTTPError, URLError
 
+from messenger_worksheets.text_messages import split_messages, utf16_length
+
 
 LOGIN = "w495"
 PAGE_SIZE = 100
@@ -752,6 +754,10 @@ class Bridge:
                 failed INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (parent, incoming)
             );
+            CREATE TABLE IF NOT EXISTS reply_text_plans (
+                parent INTEGER, incoming INTEGER, parts_json TEXT,
+                PRIMARY KEY (parent, incoming)
+            );
             CREATE TABLE IF NOT EXISTS updates (
                 parent INTEGER, incoming INTEGER, stage TEXT, payload TEXT UNIQUE,
                 sent INTEGER NOT NULL DEFAULT 0,
@@ -848,10 +854,14 @@ class Bridge:
                     if previous.get("author_guid") == self.messenger.identity.get("guid"):
                         payload = previous.get("payload_id")
                         service_payload = payload and self.db.execute(
-                            "SELECT 1 FROM updates WHERE payload=? UNION ALL "
+                            "SELECT 1 FROM updates WHERE payload=? AND stage NOT LIKE 'answer-part-%' UNION ALL "
                             "SELECT 1 FROM progress WHERE payload=?", (payload, payload),
                         ).fetchone()
-                        if service_payload or self._is_context_service_message(text):
+                        known_answer = payload and self.db.execute(
+                            "SELECT 1 FROM replies WHERE payload=? UNION ALL SELECT 1 FROM updates "
+                            "WHERE payload=? AND stage LIKE 'answer-part-%'", (payload, payload),
+                        ).fetchone()
+                        if service_payload or (not known_answer and self._is_context_service_message(text)):
                             continue
                         role = "assistant"
                     else:
@@ -1085,6 +1095,67 @@ class Bridge:
         with self.db:
             self.db.execute("UPDATE updates SET sent=1 WHERE payload=?", (payload,))
 
+    def _legacy_reply_was_delivered(self, delivery_parent: int, stamp: int, draft: str, payload: str) -> bool:
+        """Сверить исходный payload старого длинного ответа до изменения формата.
+
+        Читает полную штатную new_messages-историю только нужного треда после
+        входящего сообщения. Подтверждает доставку лишь при совпадении payload,
+        собственного author_guid и полного текста. Недоступная история, пустая
+        идентичность или противоречивый payload вызывают безопасный RuntimeError:
+        старый draft сохраняется, модель и отправка не повторяются вслепую.
+        """
+        identity = self.messenger.identity.get("guid")
+        if not isinstance(identity, str) or not identity:
+            raise RuntimeError("legacy_reply_identity_unavailable")
+        try:
+            history = self.messenger.new_messages(parent=delivery_parent, after=stamp)
+            if not isinstance(history, list):
+                raise ValueError("invalid history")
+            matching = [message for _, message in history
+                        if message.get("payload_id") == payload and message.get("author_guid") == identity]
+        except Exception:
+            raise RuntimeError("legacy_reply_delivery_unverified") from None
+        if matching and not any(message.get("text") == draft for message in matching):
+            raise RuntimeError("legacy_reply_payload_mismatch")
+        return bool(matching)
+
+    def _send_reply_text(self, parent: int, stamp: int, delivery_parent: int, draft: str, payload: str) -> None:
+        """Доставить готовый ответ частями до 4096 UTF-16 со стабильными receipts.
+
+        Короткий ответ сохраняет прежний исходный payload и путь отправки.
+        Длинный ответ сначала сохраняет точный chunk plan и все payload частей
+        в одной SQLite-транзакции, затем отправляет через status с sent-ack.
+        Повтор после частичного сбоя использует те же тексты/UUID и пропускает
+        подтверждённые части, не вызывая модель. Старый ответ без format-marker
+        сначала сверяется с историей; все ошибки оставляют durable draft.
+        parts_json очищается только при итоговом commit ответа в _respond.
+        """
+        record = self.db.execute("SELECT parts_json FROM reply_text_plans WHERE parent=? AND incoming=?", (parent, stamp)).fetchone()
+        if record is not None and record[0] is not None:
+            parts = json.loads(record[0])
+            if (not isinstance(parts, list) or not parts or any(not isinstance(part, str) or not part or utf16_length(part) > 4096 for part in parts)
+                    or "".join(parts) != draft):
+                raise RuntimeError("invalid_reply_text_plan")
+        else:
+            if utf16_length(draft) <= 4096:
+                self.messenger.send(delivery_parent, draft, payload)
+                return
+            if record is None and self._legacy_reply_was_delivered(delivery_parent, stamp, draft, payload):
+                return
+            parts = list(split_messages(draft))
+            with self.db:
+                self.db.execute("INSERT INTO reply_text_plans(parent,incoming,parts_json) VALUES (?,?,?) "
+                                "ON CONFLICT(parent,incoming) DO UPDATE SET parts_json=excluded.parts_json",
+                                (parent, stamp, json.dumps(parts, ensure_ascii=False)))
+                namespace = uuid.UUID(payload)
+                self.db.executemany(
+                    "INSERT OR IGNORE INTO updates(parent,incoming,stage,payload) VALUES (?,?,?,?)",
+                    ((parent, stamp, f"answer-part-{index}", str(uuid.uuid5(namespace, f"answer-part-{index}")))
+                     for index in range(len(parts))),
+                )
+        for index, part in enumerate(parts):
+            self.status(parent, stamp, f"answer-part-{index}", part, delivery_parent=delivery_parent)
+
     def _respond(
         self, parent: int, stamp: int, prompt: str, message: dict, session: str | None,
     ) -> str | None:
@@ -1146,6 +1217,7 @@ class Bridge:
                     "INSERT INTO replies (parent,incoming,payload,draft,failed) VALUES (?,?,?,?,?)",
                     (parent, stamp, payload, draft, 2 if cancelled else int(not task_succeeded)),
                 )
+                self.db.execute("INSERT INTO reply_text_plans(parent,incoming) VALUES (?,?)", (parent, stamp))
                 self.db.execute("UPDATE feeds SET session = ? WHERE parent = ?", (session, parent))
                 self.db.executemany(
                     "INSERT INTO artifacts (parent,incoming,path) VALUES (?,?,?)",
@@ -1201,7 +1273,7 @@ class Bridge:
                     (draft, parent, stamp),
                 )
         try:
-            self.messenger.send(delivery_parent, draft, payload)
+            self._send_reply_text(parent, stamp, delivery_parent, draft, payload)
         except Exception as error:
             print(f"reply_delivery_retry {type(error).__name__}", flush=True)
             raise
@@ -1227,6 +1299,7 @@ class Bridge:
                 "UPDATE replies SET draft = NULL WHERE parent = ? AND incoming = ?",
                 (parent, stamp),
             )
+            self.db.execute("UPDATE reply_text_plans SET parts_json=NULL WHERE parent=? AND incoming=?", (parent, stamp))
             self.db.execute("UPDATE feeds SET cursor = ? WHERE parent = ?", (stamp, parent))
         print("reply_committed", flush=True)
         return session

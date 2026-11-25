@@ -33,7 +33,7 @@ class ModelCatalogTest(unittest.TestCase):
                             ("gpt-6.2", "o3", "gpt-audio", "gpt-6-search-preview", "text-embedding-3-large", "gpt-image-1", "gpt-realtime", "gpt-x\nsecret", "unknown", "o1-mini")]}
         with patch.object(catalog, "post_model_response", return_value=json.dumps(payload).encode()) as transport:
             result = catalog.effective_models()
-        self.assertEqual([item["id"] for item in result["models"]], ["gpt-6.2", "o1-mini", "o3"])
+        self.assertEqual([item["id"] for item in result["models"]], ["gpt-6.2", "o3", "o1-mini"])
         self.assertTrue(result["models"][0]["is_default"])
         request = transport.call_args.args[0]
         self.assertEqual(request.full_url, "https://api.openai.com/v1/models")
@@ -241,6 +241,80 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertEqual(models[0]["description"], "")
         self.assertEqual(models[0]["reasoning_efforts"], [])
         self.assertNotIn("private failure", json.dumps(models))
+
+    def test_api_created_sorts_newest_across_families_without_changing_schema(self):
+        """Реальный created старше имени поколения: o4 и GPT сравниваются только по дате."""
+        entries = [{"id": "gpt-9", "created": 100}, {"id": "o4-mini", "created": 300},
+                   {"id": "o3", "created": 200}, {"id": "gpt-4.1", "created": 400},
+                   {"id": "gpt-6.2-sol", "created": 300}]
+        models, truncated = catalog._project(entries, native=False, configured=None)
+        self.assertFalse(truncated)
+        self.assertEqual([model["id"] for model in models], ["gpt-4.1", "o4-mini", "gpt-6.2-sol", "o3", "gpt-9"])
+        self.assertTrue(all(set(model) == catalog.BASE_MODEL_FIELDS | catalog.DETAIL_MODEL_FIELDS for model in models))
+        self.assertNotIn("created", json.dumps(models))
+        self.assertEqual(entries[0]["id"], "gpt-9")
+
+    def test_api_snapshot_date_is_fallback_and_real_created_remains_authoritative(self):
+        """Валидный ISO suffix задаёт дату только без created; неверная дата не угадывается."""
+        entries = [{"id": "gpt-9-2026-12-31", "created": 123},
+                   {"id": "gpt-4.1-2025-04-14"}, {"id": "o3-2026-06-01"},
+                   {"id": "gpt-6.2-2026-02-30"}, {"id": "gpt-5.10"}]
+        models, _ = catalog._project(entries, native=False, configured=None)
+        self.assertEqual([model["id"] for model in models],
+                         ["o3-2026-06-01", "gpt-4.1-2025-04-14", "gpt-9-2026-12-31", "gpt-6.2-2026-02-30", "gpt-5.10"])
+        self.assertIsNone(catalog._entry_timestamp({"id": "gpt-6.2-2026-02-30"}))
+        self.assertIsNone(catalog._entry_timestamp({"id": "gpt-6.2-20260101"}))
+
+    def test_invalid_created_does_not_override_natural_numeric_generation(self):
+        """Bool/отрицательные/NaN/строки не выдаются за дату, 5.10 располагается выше 5.9."""
+        entries = [{"id": "gpt-5.9", "created": True}, {"id": "gpt-5.10", "created": -1},
+                   {"id": "gpt-6.1", "created": "999999"}, {"id": "o3", "created": False},
+                   {"id": "gpt-6", "created": float("nan")}]
+        models, _ = catalog._project(entries, native=False, configured=None)
+        self.assertEqual([model["id"] for model in models], ["gpt-6.1", "gpt-6", "gpt-5.10", "o3", "gpt-5.9"])
+        for invalid in (True, False, -1, 0, "123", float("nan"), float("inf"), 10 ** 1000):
+            with self.subTest(value=repr(invalid)):
+                self.assertIsNone(catalog._created_timestamp(invalid))
+        self.assertEqual(catalog._created_timestamp(123.5), 123.5)
+
+    def test_native_generations_preserve_provider_priority_and_unknown_family_positions(self):
+        """Native GPT поколения идут численно вниз, sol/astra одного поколения сохраняют priority."""
+        identifiers = ["vendor-other", "gpt-5.6-sol", "gpt-6.2-sol", "gpt-5.9-sol", "gpt-6.2-astra",
+                       "gpt-6.1-terra", "gpt-6-sol", "gpt-5.10-sol"]
+        entries = [{"slug": identifier, "visibility": "list", "created": 10000 - index} for index, identifier in enumerate(identifiers)]
+        models, _ = catalog._project(entries, native=True, configured=None)
+        self.assertEqual([model["id"] for model in models], ["vendor-other", "gpt-6.2-sol", "gpt-6.2-astra",
+                                                             "gpt-6.1-terra", "gpt-6-sol", "gpt-5.10-sol", "gpt-5.9-sol", "gpt-5.6-sol"])
+        self.assertEqual([entry["slug"] for entry in entries], identifiers)
+
+    def test_duplicate_api_id_uses_latest_reliable_metadata_and_ties_are_stable(self):
+        """Дубли не размножают записи; новый created выбирает metadata, равный сохраняет первую."""
+        entries = [{"id": "gpt-5", "created": 10, "description": "old"},
+                   {"id": "gpt-4", "created": 30, "description": "other"},
+                   {"id": "gpt-5", "created": 40, "description": "latest"},
+                   {"id": "gpt-5", "created": 40, "description": "same date later in provider"},
+                   {"id": "gpt-5", "created": True, "description": "invalid date"}]
+        models, _ = catalog._project(entries, native=False, configured=None)
+        self.assertEqual([model["id"] for model in models], ["gpt-5", "gpt-4"])
+        self.assertEqual(models[0]["description"], "latest")
+        models, _ = catalog._project([{"slug": "gpt-6.2-sol", "visibility": "list", "description": "provider first"},
+                                      {"slug": "gpt-6.2-sol", "visibility": "list", "description": "later duplicate", "created": 999}],
+                                     native=True, configured=None)
+        self.assertEqual(models[0]["description"], "provider first")
+
+    def test_sort_precedes_both_count_and_public_size_caps(self):
+        """Поздно пришедшая новая модель сохраняется первой при обоих видах усечения."""
+        entries = [{"id": "gpt-" + str(index), "created": index} for index in range(1, 301)]
+        with patch.object(catalog, "MAX_MODELS", 2):
+            models, truncated = catalog._project(entries, native=False, configured=None)
+        self.assertTrue(truncated)
+        self.assertEqual([model["id"] for model in models], ["gpt-300", "gpt-299"])
+        with patch.object(catalog, "MAX_PUBLIC_BYTES", 550):
+            models, truncated = catalog._project(entries, native=False, configured=None)
+        self.assertTrue(truncated)
+        self.assertGreater(len(models), 0)
+        self.assertEqual(models[0]["id"], "gpt-300")
+        self.assertLessEqual(len(json.dumps(models, ensure_ascii=False).encode()), 550)
 
     def test_cache_serializes_fetch_and_returns_independent_values(self):
         """Одновременные вызовы делают один fetch, кеш не меняется через ответ клиента."""
